@@ -1,0 +1,19 @@
+{
+    "name": "TimboJimboEditor.UI.Layout",
+    "rootNamespace": "TimboJimboEditor.UI.Layout",
+    "references": [
+        "TimboJimbo.UI.Layout.Runtime",
+        "UnityEngine.UI"
+    ],
+    "includePlatforms": [
+        "Editor"
+    ],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

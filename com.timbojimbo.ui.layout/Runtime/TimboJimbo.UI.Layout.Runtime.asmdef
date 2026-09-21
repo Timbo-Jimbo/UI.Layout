@@ -1,0 +1,24 @@
+{
+    "name": "TimboJimbo.UI.Layout.Runtime",
+    "rootNamespace": "TimboJimbo.UI.Layout",
+    "references": [
+        "UnityEngine.UI",
+        "TimboJimbo.Core.Runtime",
+        "TimboJimbo.PropertyBindings.Runtime"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [
+        {
+            "name": "com.timbojimbo.propertybindings",
+            "expression": "0.8.5",
+            "define": "TJ_LAYOUT_PROPERTY_BINDINGS"
+        }
+    ],
+    "noEngineReferences": false
+}

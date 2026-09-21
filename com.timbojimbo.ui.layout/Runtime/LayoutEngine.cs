@@ -1,0 +1,549 @@
+using System.Collections.Generic;
+using UnityEngine;
+
+namespace TimboJimbo.UI.Layout
+{
+    /// <summary>
+    /// The layout algorithm, a port of Clay's sizing model, as a pure computation over a
+    /// <see cref="LayoutNode"/> tree. <see cref="Compute"/> reads node settings and leaf measures and writes
+    /// only the nodes' engine-space scratch (the UGUI compatibility content may touch its own transform to
+    /// answer); <see cref="Commit"/> is the single step that writes RectTransforms. Engine space is the root's
+    /// top-left corner, y down, in canvas units.
+    /// </summary>
+    internal static class LayoutEngine
+    {
+        private const float Epsilon = 1e-4f;
+
+        // The tree of the pass in progress, in depth-first order (a parent before its subtree).
+        private static readonly List<LayoutNode> s_all = new();
+        private static readonly List<LayoutNode> s_resizable = new();
+        private static readonly List<ILayoutMeasurable> s_measurables = new();
+
+        /// <summary>Number of passes computed since load; tests use it to check that clean frames do no work.</summary>
+        internal static int PassCount { get; private set; }
+
+        /// <summary>
+        /// Lays out the tree under <paramref name="root"/>. <paramref name="available"/> is the size the root
+        /// has to work with on an axis whose sizing is Grow or Percent (normally its rect size). Returns the
+        /// root's resulting size.
+        /// </summary>
+        internal static Vector2 Compute(LayoutNode root, Vector2 available)
+        {
+            PassCount++;
+            s_all.Clear();
+            Build(root, null);
+            for (int i = 0; i < s_all.Count; i++)
+                s_all[i]._passRoot = root;
+
+            for (int i = 0; i < s_all.Count; i++)
+                MeasureContent(s_all[i], -1f);
+
+            FitAxis(0);
+            SizeAxis(0, root, available.x);
+
+            // Widths are final: content that wraps answers with its height for that width (Clay wraps text here).
+            for (int i = 0; i < s_all.Count; i++)
+            {
+                var n = s_all[i];
+                if (n._measurable != null)
+                    MeasureContent(n, Mathf.Max(0f, n._size.x - n.PaddingSum(0)));
+            }
+
+            FitAxis(1);
+            SizeAxis(1, root, available.y);
+            Position(root);
+            return root._size;
+        }
+
+        /// <summary>Writes the last computed layout to the RectTransforms of the tree. Must follow <see cref="Compute"/> for the same root.</summary>
+        internal static void Commit(LayoutNode root)
+        {
+            root._tracker.Clear();
+
+            var rootRect = root.RectTransform;
+            if (root.Width.Mode is SizingMode.Fit or SizingMode.Fixed)
+                root._tracker.Add(root, rootRect, DrivenTransformProperties.SizeDeltaX);
+            if (root.Height.Mode is SizingMode.Fit or SizingMode.Fixed)
+                root._tracker.Add(root, rootRect, DrivenTransformProperties.SizeDeltaY);
+            CommitNode(root, new Rect(Vector2.zero, root._size));
+
+            for (int i = 1; i < s_all.Count; i++)
+            {
+                var n = s_all[i];
+                root._tracker.Add(root, n.RectTransform, DrivenTransformProperties.Anchors | DrivenTransformProperties.AnchoredPosition | DrivenTransformProperties.SizeDelta);
+                CommitNode(n, new Rect(n._pos, n._size));
+            }
+        }
+
+        // Records the target and writes the transform. A node with a transition that already has a rect and
+        // is given a different one starts (or retargets) a move from where it is shown now; the tick in
+        // LayoutSystem carries it the rest of the way. Edit mode and a node's first layout always jump.
+        private static void CommitNode(LayoutNode n, Rect target)
+        {
+            bool animated = Application.isPlaying && n.Transition.IsAnimated && n._hasCommitted;
+            if (animated && !Approximately(target, n._committedRect))
+            {
+                var from = n.CurrentVisual();
+                // A measured leaf's size follows its content, so it takes its new size at once and only its
+                // position animates; at intermediate widths the content would wrap or clip.
+                if (n._measurable != null)
+                    from.size = target.size;
+                n._animFrom = from;
+                n._animTo = target;
+                n._animElapsed = 0f;
+                n._animating = !Approximately(from, target);
+                if (n._animating)
+                    LayoutSystem.RegisterAnimating(n);
+            }
+            else if (!animated)
+            {
+                n._animating = false;
+            }
+
+            n._committedRect = target;
+            n._hasCommitted = true;
+            Write(n, n._animating ? n.CurrentVisual() : target);
+        }
+
+        private static bool Approximately(Rect a, Rect b) =>
+            Mathf.Abs(a.x - b.x) <= Epsilon && Mathf.Abs(a.y - b.y) <= Epsilon
+            && Mathf.Abs(a.width - b.width) <= Epsilon && Mathf.Abs(a.height - b.height) <= Epsilon;
+
+        /// <summary>Puts <paramref name="rect"/> (engine space) on the node's transform. The only place a node's rect is written, whether by a commit or by a transition tick.</summary>
+        internal static void Write(LayoutNode n, Rect rect)
+        {
+            var r = n.RectTransform;
+            if (n.IsRoot)
+            {
+                // A root keeps its anchors and position; only a Fit or Fixed axis is ours to size.
+                if (n.Width.Mode is SizingMode.Fit or SizingMode.Fixed)
+                    r.SetSizeWithCurrentAnchors(RectTransform.Axis.Horizontal, rect.width);
+                if (n.Height.Mode is SizingMode.Fit or SizingMode.Fixed)
+                    r.SetSizeWithCurrentAnchors(RectTransform.Axis.Vertical, rect.height);
+            }
+            else
+            {
+                // Same convention as LayoutGroup.SetChildAlongAxis: anchored to the parent's top-left, the
+                // position placing the pivot, so any pivot and any later animation of anchoredPosition behave
+                // as they do under a UGUI group.
+                r.anchorMin = Vector2.up;
+                r.anchorMax = Vector2.up;
+                r.sizeDelta = rect.size;
+                var pivot = r.pivot;
+                n._committedBase = new Vector2(rect.x + rect.width * pivot.x, -(rect.y + rect.height * (1f - pivot.y)));
+                r.anchoredPosition = n._committedBase + n.Offset;
+            }
+            n._visualRect = rect;
+        }
+
+        // ── Tree ───────────────────────────────────────────────────────────────
+
+        private static void Build(LayoutNode node, LayoutNode parent)
+        {
+            node._parentNode = parent;
+            node._children.Clear();
+            node._floatingChildren.Clear();
+            s_all.Add(node);
+
+            var t = node.transform;
+            for (int i = 0; i < t.childCount; i++)
+            {
+                var child = t.GetChild(i);
+                if (!child.gameObject.activeSelf || !child.TryGetComponent<LayoutNode>(out var childNode) || !childNode.enabled)
+                    continue;
+
+                if (childNode.AttachTo != AttachTo.None)
+                    node._floatingChildren.Add(childNode);
+                else
+                    node._children.Add(childNode);
+                Build(childNode, node);
+            }
+
+            node._isLeaf = node._children.Count == 0;
+            node._measurable = node._isLeaf ? FindMeasurable(node) ?? node.UguiContentOrNull() : null;
+        }
+
+        private static ILayoutMeasurable FindMeasurable(LayoutNode node)
+        {
+            node.GetComponents(s_measurables);
+            ILayoutMeasurable found = null;
+            for (int i = 0; i < s_measurables.Count; i++)
+            {
+                var m = s_measurables[i];
+                if (m is Behaviour b && !b.isActiveAndEnabled)
+                    continue;
+                found = m;
+                break;
+            }
+            s_measurables.Clear();
+            return found;
+        }
+
+        private static void MeasureContent(LayoutNode n, float availableWidth)
+        {
+            if (n._measurable == null)
+            {
+                n._contentSize = Vector2.zero;
+                n._minContentWidth = 0f;
+                return;
+            }
+            n._contentSize = Vector2.Max(n._measurable.Measure(availableWidth), Vector2.zero);
+            n._minContentWidth = Mathf.Max(0f, n._measurable.MinWidth);
+        }
+
+        // ── Sizing ─────────────────────────────────────────────────────────────
+
+        // A child's contribution to its parent's Fit before the top-down pass: Fit brings its own fit,
+        // Fixed its size, Grow its minimum, Percent nothing (it is resolved from the parent later).
+        private static float Initial(LayoutNode n, int axis)
+        {
+            var s = n.SizingOn(axis);
+            return s.Mode switch
+            {
+                SizingMode.Fit => n._fit[axis],
+                SizingMode.Fixed => s.Value,
+                SizingMode.Grow => s.Min,
+                _ => 0f,
+            };
+        }
+
+        private static float InitialMin(LayoutNode n, int axis)
+        {
+            var s = n.SizingOn(axis);
+            return s.Mode switch
+            {
+                SizingMode.Fit => n._minFit[axis],
+                SizingMode.Fixed => s.Value,
+                SizingMode.Grow => s.Min,
+                _ => 0f,
+            };
+        }
+
+        // Bottom-up (children come after their parent in s_all): each node's Fit size and the smallest
+        // size it can shrink to. Along the direction: sum plus gaps; across it: the max; both plus padding.
+        private static void FitAxis(int axis)
+        {
+            for (int i = s_all.Count - 1; i >= 0; i--)
+            {
+                var n = s_all[i];
+                float pad = n.PaddingSum(axis);
+                float fit, minFit;
+
+                if (n._isLeaf)
+                {
+                    fit = n._contentSize[axis] + pad;
+                    minFit = (axis == 0 ? n._minContentWidth : n._contentSize.y) + pad;
+                }
+                else
+                {
+                    var children = n._children;
+                    fit = 0f;
+                    minFit = 0f;
+                    if (n.LayoutAxis == axis)
+                    {
+                        for (int c = 0; c < children.Count; c++)
+                        {
+                            fit += Initial(children[c], axis);
+                            minFit += InitialMin(children[c], axis);
+                        }
+                        float gaps = n.Gap * (children.Count - 1);
+                        fit += gaps;
+                        minFit += gaps;
+                    }
+                    else
+                    {
+                        for (int c = 0; c < children.Count; c++)
+                        {
+                            fit = Mathf.Max(fit, Initial(children[c], axis));
+                            minFit = Mathf.Max(minFit, InitialMin(children[c], axis));
+                        }
+                    }
+                    fit += pad;
+                    minFit += pad;
+                }
+
+                if (axis == 1 && n.AspectRatio > 0f && n.Height.Mode == SizingMode.Fit)
+                {
+                    fit = n._size.x / n.AspectRatio;
+                    minFit = fit;
+                }
+
+                var sizing = n.SizingOn(axis);
+                n._fit[axis] = sizing.Clamp(fit);
+                n._minFit[axis] = sizing.Clamp(minFit);
+            }
+        }
+
+        // Top-down: the root takes its input size, then every container resolves its children.
+        private static void SizeAxis(int axis, LayoutNode root, float available)
+        {
+            var rootSizing = root.SizingOn(axis);
+            root._size[axis] = rootSizing.Mode switch
+            {
+                SizingMode.Fixed => rootSizing.Value,
+                SizingMode.Fit => root._fit[axis],
+                _ => Mathf.Max(0f, available),
+            };
+
+            for (int i = 0; i < s_all.Count; i++)
+            {
+                var n = s_all[i];
+                float inner = Mathf.Max(0f, n._size[axis] - n.PaddingSum(axis));
+
+                if (n._children.Count > 0)
+                {
+                    if (n.LayoutAxis == axis)
+                        SizeAlong(n, axis, inner);
+                    else
+                        SizeAcross(n, axis, inner);
+                }
+
+                // Floating children size against their parent's inner size, whatever they attach to; a Fit
+                // one keeps its own fit, since it is not confined to the parent.
+                var floating = n._floatingChildren;
+                for (int f = 0; f < floating.Count; f++)
+                    floating[f]._size[axis] = ResolveFloating(floating[f], axis, inner);
+            }
+        }
+
+        // Across the direction a child has the parent's inner size to itself: Grow fills it (within its
+        // bounds), Fit wraps to it but never below its minimum, Fixed and Percent are what they say.
+        private static float ResolveAcross(LayoutNode c, int axis, float inner)
+        {
+            var s = c.SizingOn(axis);
+            return s.Mode switch
+            {
+                SizingMode.Fixed => s.Value,
+                SizingMode.Percent => inner * s.Value,
+                SizingMode.Grow => s.Clamp(inner),
+                _ => Mathf.Max(Mathf.Min(c._fit[axis], inner), c._minFit[axis]),
+            };
+        }
+
+        private static float ResolveFloating(LayoutNode c, int axis, float inner)
+        {
+            var s = c.SizingOn(axis);
+            return s.Mode switch
+            {
+                SizingMode.Fixed => s.Value,
+                SizingMode.Percent => inner * s.Value,
+                SizingMode.Grow => s.Clamp(inner),
+                _ => c._fit[axis],
+            };
+        }
+
+        private static void SizeAcross(LayoutNode n, int axis, float inner)
+        {
+            var children = n._children;
+            for (int c = 0; c < children.Count; c++)
+                children[c]._size[axis] = ResolveAcross(children[c], axis, inner);
+        }
+
+        private static void SizeAlong(LayoutNode n, int axis, float inner)
+        {
+            var children = n._children;
+            float available = inner - n.Gap * (children.Count - 1);
+            float used = 0f;
+            for (int c = 0; c < children.Count; c++)
+            {
+                var child = children[c];
+                var s = child.SizingOn(axis);
+                child._size[axis] = s.Mode switch
+                {
+                    SizingMode.Fixed => s.Value,
+                    SizingMode.Percent => Mathf.Max(0f, available) * s.Value,
+                    SizingMode.Grow => s.Min,
+                    _ => child._fit[axis],
+                };
+                used += child._size[axis];
+            }
+
+            float remaining = available - used;
+            if (remaining > Epsilon)
+                Grow(children, axis, remaining);
+            else if (remaining < -Epsilon)
+                Shrink(children, axis, -remaining);
+        }
+
+        // Clay's distribution: the smallest Grow children are raised together until they meet the next
+        // size up, a max, or the space runs out; repeat. Equal children therefore end up equal.
+        private static void Grow(List<LayoutNode> children, int axis, float remaining)
+        {
+            s_resizable.Clear();
+            for (int c = 0; c < children.Count; c++)
+            {
+                var s = children[c].SizingOn(axis);
+                if (s.Mode == SizingMode.Grow && (!s.HasMax || children[c]._size[axis] < s.Max - Epsilon))
+                    s_resizable.Add(children[c]);
+            }
+
+            while (remaining > Epsilon && s_resizable.Count > 0)
+            {
+                float smallest = float.MaxValue, second = float.MaxValue;
+                int count = 0;
+                for (int i = 0; i < s_resizable.Count; i++)
+                {
+                    float v = s_resizable[i]._size[axis];
+                    if (v < smallest - Epsilon) { second = smallest; smallest = v; count = 1; }
+                    else if (v < smallest + Epsilon) count++;
+                    else if (v < second) second = v;
+                }
+
+                float add = remaining / count;
+                if (second < float.MaxValue) add = Mathf.Min(add, second - smallest);
+                for (int i = 0; i < s_resizable.Count; i++)
+                {
+                    var r = s_resizable[i];
+                    var s = r.SizingOn(axis);
+                    if (s.HasMax && Mathf.Abs(r._size[axis] - smallest) <= Epsilon)
+                        add = Mathf.Min(add, s.Max - r._size[axis]);
+                }
+                if (add <= Epsilon) break;
+
+                for (int i = s_resizable.Count - 1; i >= 0; i--)
+                {
+                    var r = s_resizable[i];
+                    if (Mathf.Abs(r._size[axis] - smallest) > Epsilon) continue;
+                    r._size[axis] += add;
+                    remaining -= add;
+                    var s = r.SizingOn(axis);
+                    if (s.HasMax && r._size[axis] >= s.Max - Epsilon)
+                        s_resizable.RemoveAt(i);
+                }
+            }
+        }
+
+        // The mirror image on overflow: the largest shrinkable children come down together until they
+        // meet the next size down or a floor. Grow floors at its Min, Fit at its minimum fit (a leaf's
+        // content minimum, such as the longest word); Fixed and Percent never shrink.
+        private static void Shrink(List<LayoutNode> children, int axis, float excess)
+        {
+            s_resizable.Clear();
+            for (int c = 0; c < children.Count; c++)
+            {
+                if (Floor(children[c], axis) < children[c]._size[axis] - Epsilon)
+                    s_resizable.Add(children[c]);
+            }
+
+            while (excess > Epsilon && s_resizable.Count > 0)
+            {
+                float largest = float.MinValue, second = float.MinValue;
+                int count = 0;
+                for (int i = 0; i < s_resizable.Count; i++)
+                {
+                    float v = s_resizable[i]._size[axis];
+                    if (v > largest + Epsilon) { second = largest; largest = v; count = 1; }
+                    else if (v > largest - Epsilon) count++;
+                    else if (v > second) second = v;
+                }
+
+                float remove = excess / count;
+                if (second > float.MinValue) remove = Mathf.Min(remove, largest - second);
+                for (int i = 0; i < s_resizable.Count; i++)
+                {
+                    var r = s_resizable[i];
+                    if (Mathf.Abs(r._size[axis] - largest) <= Epsilon)
+                        remove = Mathf.Min(remove, r._size[axis] - Floor(r, axis));
+                }
+                if (remove <= Epsilon) break;
+
+                for (int i = s_resizable.Count - 1; i >= 0; i--)
+                {
+                    var r = s_resizable[i];
+                    if (Mathf.Abs(r._size[axis] - largest) > Epsilon) continue;
+                    r._size[axis] -= remove;
+                    excess -= remove;
+                    if (Floor(r, axis) >= r._size[axis] - Epsilon)
+                        s_resizable.RemoveAt(i);
+                }
+            }
+        }
+
+        private static float Floor(LayoutNode c, int axis)
+        {
+            var s = c.SizingOn(axis);
+            return s.Mode switch
+            {
+                SizingMode.Grow => s.Min,
+                SizingMode.Fit => c._minFit[axis],
+                _ => c._size[axis],
+            };
+        }
+
+        // ── Positions ──────────────────────────────────────────────────────────
+
+        // Three steps. Every flow child gets its position within its parent, which needs only sizes. The
+        // flow tree under the root then gets its root-relative positions, so any flow node can serve as an
+        // attach target wherever it sits. Finally each floating node, in hierarchy order, is placed against
+        // its target and its own flow subtree is resolved under it; a target that is itself floating is
+        // therefore current only when it precedes the node in hierarchy order.
+        private static void Position(LayoutNode root)
+        {
+            for (int i = 0; i < s_all.Count; i++)
+            {
+                var n = s_all[i];
+                var children = n._children;
+                if (children.Count == 0) continue;
+
+                int along = n.LayoutAxis;
+                int across = 1 - along;
+                float innerAlong = n._size[along] - n.PaddingSum(along);
+                float innerAcross = n._size[across] - n.PaddingSum(across);
+
+                float total = n.Gap * (children.Count - 1);
+                for (int c = 0; c < children.Count; c++)
+                    total += children[c]._size[along];
+
+                float cursor = n.PaddingStart(along) + n.AlignFraction(along) * (innerAlong - total);
+                for (int c = 0; c < children.Count; c++)
+                {
+                    var child = children[c];
+                    child._pos[along] = cursor;
+                    child._pos[across] = n.PaddingStart(across) + n.AlignFraction(across) * (innerAcross - child._size[across]);
+                    cursor += child._size[along] + n.Gap;
+                }
+            }
+
+            root._pos = Vector2.zero;
+            root._absPos = Vector2.zero;
+            ResolveFlowPositions(root);
+
+            for (int i = 1; i < s_all.Count; i++)
+            {
+                var n = s_all[i];
+                if (n.AttachTo == AttachTo.None) continue;
+
+                var parent = n._parentNode;
+                var target = parent;
+                if (n.AttachTo == AttachTo.Root)
+                    target = root;
+                else if (n.AttachTo == AttachTo.Element && n.AttachElement != null
+                         && n.AttachElement.TryGetComponent<LayoutNode>(out var element) && ReferenceEquals(element._passRoot, root))
+                    target = element;
+
+                var targetPoint = target._absPos + Point(n.ParentPoint, target._size);
+                n._absPos = targetPoint - Point(n.ElementPoint, n._size) + n.FloatOffset;
+                n._pos = n._absPos - parent._absPos;
+                ResolveFlowPositions(n);
+            }
+        }
+
+        // Root-relative positions of the flow children under a node whose own position is known.
+        private static void ResolveFlowPositions(LayoutNode node)
+        {
+            var children = node._children;
+            for (int c = 0; c < children.Count; c++)
+            {
+                var child = children[c];
+                child._absPos = node._absPos + child._pos;
+                ResolveFlowPositions(child);
+            }
+        }
+
+        private static Vector2 Point(AttachPoint point, Vector2 size)
+        {
+            int p = (int)point;
+            return new Vector2(size.x * ((p % 3) * 0.5f), size.y * ((p / 3) * 0.5f));
+        }
+    }
+}

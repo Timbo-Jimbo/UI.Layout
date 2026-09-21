@@ -1,0 +1,27 @@
+{
+	"name": "com.timbojimbo.ui.layout",
+	"displayName":"UI Layout",
+	"version": "0.1.0",
+	"unity": "6000.0",
+	"unityRelease": "0f1",
+	"description": "A layout engine for UGUI, modelled on Clay: fit, grow, fixed and percent sizing, padding, gap, alignment, floating elements and aspect ratios, computed as a pure pass and committed to RectTransforms once.",
+	"dependencies": {
+		"com.unity.ugui": "2.0.0",
+		"com.timbojimbo.core": "0.6.0"
+	},
+	"samples": [
+		{
+			"displayName": "Layout",
+			"description": "A showcase scene: the sizing modes, alignment, shrink and wrap, floating, aspect ratio and a scrolling list, with buttons that add rows, flip a direction, change a gap and pulse an Offset.",
+			"path": "Samples~/Layout"
+		}
+	],
+	"author": {
+		"name": "Timbo Jimbo",
+		"url": "https://timbojimbo.com",
+		"email": "hello@timbojimbo.com"
+	},
+	"changelogUrl": "https://github.com/Timbo-Jimbo/UI.Layout/blob/main/com.timbojimbo.ui.layout/CHANGELOG.md",
+	"documentationUrl": "https://github.com/Timbo-Jimbo/UI.Layout#readme",
+	"licensesUrl": "https://github.com/Timbo-Jimbo/UI.Layout/blob/main/LICENSE"
+}
