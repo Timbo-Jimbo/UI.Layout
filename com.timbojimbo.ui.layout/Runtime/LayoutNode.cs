@@ -35,6 +35,12 @@ namespace TimboJimbo.UI.Layout
         [SerializeField] private AttachPoint _parentPoint = AttachPoint.LeftTop;
         [SerializeField] private Vector2 _floatOffset;
         [SerializeField] private LayoutTransition _transition;
+        [Tooltip("Like the web's view-transition-name: a node that appears in a view transition with the name another node had before it takes that node's place, the two flying and cross-fading. Empty means the node matches only itself.")]
+        [SerializeField] private string _viewTransitionName;
+        [Tooltip("Namespaces the view transition names of every node below this one (and its own): set it to the item's id when a prefab instance is bound to data, so a list of the same prefab has no duplicate names and a page bound to the same item pairs with that instance's parts. Empty means the names are used as they are.")]
+        [SerializeField] private string _viewTransitionScope;
+        [Tooltip("Keep this object across a view transition instead of cross-fading it with the node that carries its name in the new state: the two swap places, so this one flies into the new spot with its state (a running animation, a playing video) intact, and the new copy waits where this one was for the trip back. Flag both copies.")]
+        [SerializeField] private bool _viewTransitionPersist;
 
         // Engine scratch, valid from the owning root's Compute to its Commit. Engine space is the root's
         // top-left corner, y down; _pos is relative to the parent node's top-left, _absPos to the root's.
@@ -60,11 +66,42 @@ namespace TimboJimbo.UI.Layout
         internal Vector2 _committedBase;
         internal bool _hasCommitted;
 
-        // Transition state: from the rect the node was showing when the target changed, to the target.
+        // Transition state: from the rect the node was showing when the target changed, to the target, over
+        // the transition in force when the move started (the node's own, or a batch's).
         internal Rect _animFrom;
         internal Rect _animTo;
         internal float _animElapsed;
         internal bool _animating;
+        internal LayoutTransition _animTransition;
+
+        // A fade riding on the move: the CanvasGroup goes from _fadeFrom to _fadeTo with the move's progress and is
+        // put back to _fadeRestore when the move ends, the node is disabled or an exit concludes. A group is added
+        // the first time the object needs one and stays (at alpha 1 it costs nothing); destroying it would leave a
+        // dying component for a transition started in the same frame to find and adopt.
+        internal CanvasGroup _fadeGroup;
+        internal float _fadeFrom;
+        internal float _fadeTo;
+        internal float _fadeRestore;
+        internal bool _fadePassThrough;
+
+        // A node a view transition has lifted into its canvas's transition layer, with the placeholder that keeps
+        // its slot in the tree meanwhile; and the placeholders themselves, which are never captured or grouped.
+        internal bool _lifted;
+        internal LayoutNode _placeholder;
+        internal bool _isPlaceholder;
+
+        // Where the node was shown, in world space, when a view transition captured the scene; valid for the
+        // transition whose id matches.
+        internal int _captureId;
+        internal Rect _capturedWorld;
+
+        // An exiting node stays enabled but leaves the flow; its tree reflows without it while it moves out,
+        // then _exitThen runs (or the object is deactivated). The token tells an animator's late "done" from
+        // the exit it belongs to.
+        internal bool _exiting;
+        internal bool _exitStarted;
+        internal int _exitToken;
+        internal System.Action _exitThen;
 
         private RectTransform _rectTransform;
 
@@ -178,7 +215,7 @@ namespace TimboJimbo.UI.Layout
             {
                 if (_offset == value) return;
                 _offset = value;
-                if (_hasCommitted && !IsRoot)
+                if ((_hasCommitted && !IsRoot) || _lifted)
                     RectTransform.anchoredPosition = _committedBase + _offset;
             }
         }
@@ -244,15 +281,71 @@ namespace TimboJimbo.UI.Layout
         }
 
         /// <summary>
-        /// How the node moves to a new rect: over a duration with an ease, or instantly (the default).
-        /// Only what a pass changes animates; a node that keeps its rect stays put, and a node's first
-        /// layout is never animated. Changing this never triggers a pass.
+        /// The transition this node moves with inside a view transition, in place of the one the transition was
+        /// started with, the way a CSS rule on <c>::view-transition-group(name)</c> overrides the default. None
+        /// (the default) means the transition's own. Outside a view transition layout is instant, whatever this
+        /// is set to. Changing it never triggers a pass.
         /// </summary>
         public LayoutTransition Transition
         {
             get => _transition;
             set => _transition = value;
         }
+
+        /// <summary>
+        /// Like the web's <c>view-transition-name</c>. A node that appears in a view transition carrying the name
+        /// another node had before the update takes that node's place: it flies in from where the old node was
+        /// while the old node, if it is still shown, flies out to the new spot, the two cross-fading. Set it when
+        /// binding data, for instance to the item's id, so the card in a list and the header of its detail page
+        /// share it. Empty (the default) matches the node with itself only. The same name on two nodes at once
+        /// skips the transition. Changing it never triggers a pass.
+        /// </summary>
+        public string ViewTransitionName
+        {
+            get => _viewTransitionName;
+            set => _viewTransitionName = value;
+        }
+
+        /// <summary>
+        /// Namespaces the <see cref="ViewTransitionName"/> of every node below this one, and its own: a name
+        /// resolves to <c>scope/name</c> under the nearest node with a scope. Author part names in a prefab
+        /// ("avatar", "title") and set the scope to the item's id on the instance's root when it is bound, so a
+        /// list of the same prefab has no duplicate names and a page given the same scope pairs with that
+        /// instance's parts. Empty (the default) leaves the names as they are. Changing it never triggers a pass.
+        /// </summary>
+        public string ViewTransitionScope
+        {
+            get => _viewTransitionScope;
+            set => _viewTransitionScope = value;
+        }
+
+        /// <summary>
+        /// Like Astro's <c>transition:persist</c>. When this node is captured and the new state has a node with
+        /// its name, the two are not cross-faded: they swap places in the hierarchy, so this object flies into
+        /// the new spot with its state intact (a running animation, a playing video) and the new copy waits
+        /// where this one was, ready for the trip back. Flag both copies so the swap works in both directions.
+        /// </summary>
+        public bool ViewTransitionPersist
+        {
+            get => _viewTransitionPersist;
+            set => _viewTransitionPersist = value;
+        }
+
+        /// <summary>The name a view transition matches this node by: its name under the nearest scope, or null when it has no name.</summary>
+        internal string ResolvedViewTransitionName()
+        {
+            if (string.IsNullOrEmpty(_viewTransitionName))
+                return null;
+            for (var t = transform; t != null; t = t.parent)
+            {
+                if (t.TryGetComponent<LayoutNode>(out var node) && !string.IsNullOrEmpty(node._viewTransitionScope))
+                    return node._viewTransitionScope + "/" + _viewTransitionName;
+            }
+            return _viewTransitionName;
+        }
+
+        /// <summary>True from <see cref="LayoutSystem.Exit"/> until the node has left: it is out of the flow and on its way out.</summary>
+        public bool IsExiting => _exiting;
 
         /// <summary>This node's RectTransform.</summary>
         public RectTransform RectTransform => _rectTransform != null ? _rectTransform : (_rectTransform = (RectTransform)transform);
@@ -298,11 +391,20 @@ namespace TimboJimbo.UI.Layout
         internal Rect CurrentVisual()
         {
             if (!_animating) return _visualRect;
-            float t = _transition.Duration > 0f ? Mathf.Clamp01(_animElapsed / _transition.Duration) : 1f;
-            float eased = EaseUtility.Evaluate(t, _transition.Ease);
+            float eased = EasedProgress();
             return new Rect(
                 Vector2.LerpUnclamped(_animFrom.position, _animTo.position, eased),
                 Vector2.LerpUnclamped(_animFrom.size, _animTo.size, eased));
+        }
+
+        /// <summary>The in-flight move's eased progress, 0 to 1: 0 through its delay, then eased over its duration.</summary>
+        internal float EasedProgress() => EaseUtility.Evaluate(Progress(), _animTransition.Ease);
+
+        /// <summary>The in-flight move's linear progress, 0 to 1: 0 through its delay, then straight over its duration.</summary>
+        internal float Progress()
+        {
+            float elapsed = _animElapsed - _animTransition.Delay;
+            return _animTransition.Duration > 0f ? Mathf.Clamp01(elapsed / _animTransition.Duration) : elapsed >= 0f ? 1f : 0f;
         }
 
         // ── Axis helpers for the engine ────────────────────────────────────────
@@ -340,19 +442,25 @@ namespace TimboJimbo.UI.Layout
         protected override void OnEnable()
         {
             base.OnEnable();
+            LayoutSystem.Register(this);
             RegisterGraphicCallbacks();
             SetDirty();
         }
 
-        // Transition state is scoped to one enabled span: the first commit after an enable snaps, so a node
-        // never animates from where it was when it was last disabled. To animate a node in from its
-        // laid-out spot, enable it, ForceLayout its root, then change the property.
+        // Layout state is scoped to one enabled span: the first commit after an enable is a first layout, so a
+        // re-enabled node enters (in a view transition) rather than moving from where it was last shown.
         protected override void OnDisable()
         {
+            LayoutSystem.Unregister(this);
             UnregisterGraphicCallbacks();
             _tracker.Clear();
             _animating = false;
             _hasCommitted = false;
+            _exiting = false;
+            _exitStarted = false;
+            _exitThen = null;
+            LayoutEngine.EndFade(this);
+            LayoutSystem.LiftedNodeDisabled(this);
             // The tree this node leaves re-lays out without it; a disabled node cannot carry the mark itself.
             LayoutSystem.MarkDirty(ParentNode);
             base.OnDisable();

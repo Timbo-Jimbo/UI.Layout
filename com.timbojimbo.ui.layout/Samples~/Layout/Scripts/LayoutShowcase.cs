@@ -31,44 +31,47 @@ namespace TimboJimbo.UI.Layout.Samples.Layout
             UpdateStatus();
         }
 
-        /// <summary>Clones the template row at the end of the list; the list reflows before the next render.</summary>
+        /// <summary>Clones the template row at the end of the list inside a view transition: the new row fades in.</summary>
         public void AddRow()
         {
             if (_list == null || _rowTemplate == null) return;
-            var row = Instantiate(_rowTemplate, _list.transform);
-            row.gameObject.SetActive(true);
-            row.name = $"Row {_rows.Count + 1}";
-            var label = row.GetComponentInChildren<TMP_Text>(true);
-            if (label != null)
-                label.text = $"Row {_rows.Count + 1}";
-            _rows.Add(row);
+            LayoutSystem.StartViewTransition(() =>
+            {
+                var row = Instantiate(_rowTemplate, _list.transform);
+                row.gameObject.SetActive(true);
+                row.name = $"Row {_rows.Count + 1}";
+                var label = row.GetComponentInChildren<TMP_Text>(true);
+                if (label != null)
+                    label.text = $"Row {_rows.Count + 1}";
+                _rows.Add(row);
+            });
             UpdateStatus();
         }
 
-        /// <summary>Destroys the last row; the list notices the child change and reflows.</summary>
+        /// <summary>Takes the last row out with an exit; the list closes up with the transition its rows set.</summary>
         public void RemoveRow()
         {
             if (_rows.Count == 0) return;
             var row = _rows[_rows.Count - 1];
             _rows.RemoveAt(_rows.Count - 1);
-            Destroy(row.gameObject);
+            LayoutSystem.StartViewTransition(() => LayoutSystem.Exit(row, () => Destroy(row.gameObject)));
             UpdateStatus();
         }
 
-        /// <summary>Lays the sizing row out along the other axis; the same sizing modes apply to the other dimension.</summary>
+        /// <summary>Lays the sizing row out along the other axis in a view transition; the same sizing modes apply to the other dimension.</summary>
         public void ToggleDirection()
         {
             if (_sizingRow == null) return;
-            _sizingRow.Direction = _sizingRow.Direction == LayoutDirection.LeftToRight
+            LayoutSystem.StartViewTransition(() => _sizingRow.Direction = _sizingRow.Direction == LayoutDirection.LeftToRight
                 ? LayoutDirection.TopToBottom
-                : LayoutDirection.LeftToRight;
+                : LayoutDirection.LeftToRight);
             UpdateStatus();
         }
 
         public void ChangeGap(float delta)
         {
             if (_sizingRow == null) return;
-            _sizingRow.Gap = Mathf.Max(0f, _sizingRow.Gap + delta);
+            LayoutSystem.StartViewTransition(() => _sizingRow.Gap = Mathf.Max(0f, _sizingRow.Gap + delta));
             UpdateStatus();
         }
 

@@ -4,7 +4,8 @@
     "references": [
         "UnityEngine.UI",
         "TimboJimbo.Core.Runtime",
-        "TimboJimbo.PropertyBindings.Runtime"
+        "TimboJimbo.PropertyBindings.Runtime",
+        "TimboJimbo.Sequencer.Runtime"
     ],
     "includePlatforms": [],
     "excludePlatforms": [],
@@ -18,6 +19,11 @@
             "name": "com.timbojimbo.propertybindings",
             "expression": "0.8.5",
             "define": "TJ_LAYOUT_PROPERTY_BINDINGS"
+        },
+        {
+            "name": "com.timbojimbo.sequencer",
+            "expression": "0.8.6",
+            "define": "TJ_LAYOUT_SEQUENCER"
         }
     ],
     "noEngineReferences": false

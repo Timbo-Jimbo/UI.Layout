@@ -23,6 +23,7 @@ namespace TimboJimbo.UI.Layout
         private const float WidthTolerance = 1e-3f;
         private static readonly List<ILayoutElement> s_elements = new();
 
+        private static readonly List<Graphic> s_graphicsScratch = new();
         private readonly List<Graphic> _graphics = new();
         private UnityAction _onGraphicLayoutDirty;
         private UguiContent _uguiContent;
@@ -37,7 +38,22 @@ namespace TimboJimbo.UI.Layout
             s_elements.Clear();
             if (!any)
                 return null;
+            // A Graphic added after the node was enabled has no callback yet; every pass that measures UGUI
+            // content brings the registrations in line with the components present.
+            if (_graphics.Count != CountGraphics())
+            {
+                UnregisterGraphicCallbacks();
+                RegisterGraphicCallbacks();
+            }
             return _uguiContent ??= new UguiContent(this);
+        }
+
+        private int CountGraphics()
+        {
+            GetComponents(s_graphicsScratch);
+            int count = s_graphicsScratch.Count;
+            s_graphicsScratch.Clear();
+            return count;
         }
 
         // The root bridge is an ILayoutElement too, but it reports this tree's own size to a UGUI parent;

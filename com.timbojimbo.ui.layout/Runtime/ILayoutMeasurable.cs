@@ -14,5 +14,12 @@ namespace TimboJimbo.UI.Layout
 
         /// <summary>The narrowest the content can be laid out at (the longest word for text). 0 if it can vanish.</summary>
         float MinWidth { get; }
+
+        /// <summary>
+        /// True when the content can be drawn at sizes between two layouts, so a transition may animate the node's
+        /// size (an image scales). False, the default, when it cannot (text re-wraps or clips), and a transition
+        /// gives the node its new size at once and animates only its position.
+        /// </summary>
+        bool SizeIsAnimatable => false;
     }
 }

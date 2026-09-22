@@ -65,7 +65,9 @@ namespace TimboJimbo.UI.Layout
                 root._tracker.Add(root, rootRect, DrivenTransformProperties.SizeDeltaX);
             if (root.Height.Mode is SizingMode.Fit or SizingMode.Fixed)
                 root._tracker.Add(root, rootRect, DrivenTransformProperties.SizeDeltaY);
-            CommitNode(root, new Rect(Vector2.zero, root._size));
+            // A lifted node's own rect is its flight's; only its subtree is laid out, against that rect.
+            if (!root._lifted)
+                CommitNode(root, new Rect(Vector2.zero, root._size));
 
             for (int i = 1; i < s_all.Count; i++)
             {
@@ -75,37 +77,133 @@ namespace TimboJimbo.UI.Layout
             }
         }
 
-        // Records the target and writes the transform. A node with a transition that already has a rect and
-        // is given a different one starts (or retargets) a move from where it is shown now; the tick in
-        // LayoutSystem carries it the rest of the way. Edit mode and a node's first layout always jump.
+        // Records the target and writes the transform. Layout is instant: a view transition animates after its
+        // update's pass, not in it (see LayoutSystem.ViewTransitions). A pass while a move is in flight leaves the
+        // move alone, and only a changed target retargets it, with the move's own timing, as a page change during
+        // a web transition would; the tick in LayoutSystem carries every move the rest of the way.
         private static void CommitNode(LayoutNode n, Rect target)
         {
-            bool animated = Application.isPlaying && n.Transition.IsAnimated && n._hasCommitted;
-            if (animated && !Approximately(target, n._committedRect))
+            if (n._animating && !Approximately(target, n._committedRect))
             {
                 var from = n.CurrentVisual();
-                // A measured leaf's size follows its content, so it takes its new size at once and only its
-                // position animates; at intermediate widths the content would wrap or clip.
-                if (n._measurable != null)
+                // Content that cannot be drawn between two sizes (text) takes its new size at once and only its
+                // position animates; at intermediate widths it would wrap or clip.
+                if (n._measurable != null && !n._measurable.SizeIsAnimatable)
                     from.size = target.size;
-                n._animFrom = from;
-                n._animTo = target;
-                n._animElapsed = 0f;
-                n._animating = !Approximately(from, target);
-                if (n._animating)
-                    LayoutSystem.RegisterAnimating(n);
+                if (Approximately(from, target))
+                    n._animating = false;
+                else
+                    StartMove(n, from, target, n._animTransition);
             }
-            else if (!animated)
-            {
-                n._animating = false;
-            }
-
             n._committedRect = target;
             n._hasCommitted = true;
             Write(n, n._animating ? n.CurrentVisual() : target);
         }
 
-        private static bool Approximately(Rect a, Rect b) =>
+        /// <summary>Starts a move between two engine-space rects under the node's parent.</summary>
+        internal static void StartMove(LayoutNode n, Rect from, Rect to, LayoutTransition transition)
+        {
+            n._animFrom = from;
+            n._animTo = to;
+            n._animElapsed = 0f;
+            n._animTransition = transition;
+            n._animating = true;
+            LayoutSystem.RegisterAnimating(n);
+        }
+
+        internal static void StopMove(LayoutNode n)
+        {
+            n._animating = false;
+            EndFade(n);
+        }
+
+        /// <summary>
+        /// Fades the node's CanvasGroup, adding one the first time the object needs it: in, from invisible up to the
+        /// alpha it has, or out, from that alpha to invisible, driven by the move's eased progress so the crossover
+        /// of a pair rides the motion whichever way a transition runs. <paramref name="passThrough"/> lets clicks
+        /// through a node on its way out. <see cref="EndFade"/> puts the group back; the group stays on the object.
+        /// </summary>
+        internal static void StartFade(LayoutNode n, bool fadeIn, bool passThrough = false)
+        {
+            var group = TakeGroup(n, passThrough);
+            float shown = group.alpha;
+            n._fadeFrom = fadeIn ? 0f : shown;
+            n._fadeTo = fadeIn ? shown : 0f;
+            n._fadeRestore = shown;
+            group.alpha = n._fadeFrom;
+        }
+
+        /// <summary>Hides the node until <see cref="EndFade"/>, letting clicks through: the copy of a persisting pair while the kept object flies to it.</summary>
+        internal static void Hide(LayoutNode n)
+        {
+            var group = TakeGroup(n, true);
+            n._fadeRestore = group.alpha;
+            n._fadeFrom = n._fadeTo = 0f;
+            group.alpha = 0f;
+        }
+
+        private static CanvasGroup TakeGroup(LayoutNode n, bool passThrough)
+        {
+            EndFade(n);
+            if (!n.TryGetComponent(out CanvasGroup group))
+                group = n.gameObject.AddComponent<CanvasGroup>();
+            n._fadeGroup = group;
+            if (passThrough && group.blocksRaycasts)
+            {
+                group.blocksRaycasts = false;
+                n._fadePassThrough = true;
+            }
+            return group;
+        }
+
+        /// <summary>Ends a fade or a hide: the group shows at the value it had and stays on the object for the next one.</summary>
+        internal static void EndFade(LayoutNode n)
+        {
+            var group = n._fadeGroup;
+            n._fadeGroup = null;
+            if (group == null) return;
+            group.alpha = n._fadeRestore;
+            if (n._fadePassThrough)
+                group.blocksRaycasts = true;
+            n._fadePassThrough = false;
+        }
+
+        /// <summary>An offset given like <see cref="LayoutNode.Offset"/> (y up) in engine space (y down).</summary>
+        internal static Vector2 ToEngine(Vector2 offset) => new(offset.x, -offset.y);
+
+        /// <summary>The rect a transform shows on screen: its top-left corner and size in world units.</summary>
+        internal static Rect WorldRect(RectTransform rt)
+        {
+            var rect = rt.rect;
+            var topLeft = rt.TransformPoint(new Vector3(rect.xMin, rect.yMax, 0f));
+            var scale = rt.lossyScale;
+            return new Rect(topLeft.x, topLeft.y, rect.width * scale.x, rect.height * scale.y);
+        }
+
+        /// <summary>A world rect as the engine-space rect that would put a (non-root) node there under its parent's current frame, its Offset taken out since the write adds it.</summary>
+        internal static Rect RelFromWorld(LayoutNode n, Rect world)
+        {
+            var parent = (RectTransform)n.RectTransform.parent;
+            var pr = parent.rect;
+            var local = parent.InverseTransformPoint(new Vector3(world.x, world.y, 0f));
+            var scale = parent.lossyScale;
+            var size = new Vector2(scale.x != 0f ? world.width / scale.x : world.width, scale.y != 0f ? world.height / scale.y : world.height);
+            var offset = ToEngine(n.Offset);
+            return new Rect(local.x - pr.xMin - offset.x, pr.yMax - local.y - offset.y, size.x, size.y);
+        }
+
+        /// <summary>Where an engine-space rect of a (non-root) node lands on screen under its parent's current frame, in world units.</summary>
+        internal static Rect WorldFromRel(LayoutNode n, Rect rel)
+        {
+            var parent = (RectTransform)n.RectTransform.parent;
+            var pr = parent.rect;
+            var offset = ToEngine(n.Offset);
+            var world = parent.TransformPoint(new Vector3(pr.xMin + rel.x + offset.x, pr.yMax - rel.y - offset.y, 0f));
+            var scale = parent.lossyScale;
+            return new Rect(world.x, world.y, rel.width * scale.x, rel.height * scale.y);
+        }
+
+        internal static bool Approximately(Rect a, Rect b) =>
             Mathf.Abs(a.x - b.x) <= Epsilon && Mathf.Abs(a.y - b.y) <= Epsilon
             && Mathf.Abs(a.width - b.width) <= Epsilon && Mathf.Abs(a.height - b.height) <= Epsilon;
 
@@ -113,9 +211,10 @@ namespace TimboJimbo.UI.Layout
         internal static void Write(LayoutNode n, Rect rect)
         {
             var r = n.RectTransform;
-            if (n.IsRoot)
+            if (n.IsRoot && !n._lifted)
             {
-                // A root keeps its anchors and position; only a Fit or Fixed axis is ours to size.
+                // A root keeps its anchors and position; only a Fit or Fixed axis is ours to size. (A lifted node
+                // is a root of nothing while it sits in the transition layer: it is placed like a child.)
                 if (n.Width.Mode is SizingMode.Fit or SizingMode.Fixed)
                     r.SetSizeWithCurrentAnchors(RectTransform.Axis.Horizontal, rect.width);
                 if (n.Height.Mode is SizingMode.Fit or SizingMode.Fixed)
@@ -149,7 +248,8 @@ namespace TimboJimbo.UI.Layout
             for (int i = 0; i < t.childCount; i++)
             {
                 var child = t.GetChild(i);
-                if (!child.gameObject.activeSelf || !child.TryGetComponent<LayoutNode>(out var childNode) || !childNode.enabled)
+                // An exiting node has left the flow; it stays drawn where it was while its exit plays.
+                if (!child.gameObject.activeSelf || !child.TryGetComponent<LayoutNode>(out var childNode) || !childNode.enabled || childNode._exiting)
                     continue;
 
                 if (childNode.AttachTo != AttachTo.None)
