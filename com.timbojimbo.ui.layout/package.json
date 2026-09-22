@@ -14,6 +14,11 @@
 			"displayName": "Layout",
 			"description": "A showcase scene: the sizing modes, alignment, shrink and wrap, floating, aspect ratio and a scrolling list, with buttons that add rows, flip a direction, change a gap and pulse an Offset.",
 			"path": "Samples~/Layout"
+		},
+		{
+			"displayName": "View Transitions",
+			"description": "A scene of stages that show each view transition feature on its own (layout changes, enter and exit, an animator, delay, a node's own transition, reparenting, named pairs, scopes, persist) and then composed: a card opening into a page spawned from a prefab, and the same insertion with and without a transition.",
+			"path": "Samples~/ViewTransitions"
 		}
 	],
 	"author": {

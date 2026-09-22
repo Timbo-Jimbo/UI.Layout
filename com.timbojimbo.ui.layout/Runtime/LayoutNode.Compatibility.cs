@@ -61,6 +61,22 @@ namespace TimboJimbo.UI.Layout
         private static bool IsMeasurableElement(ILayoutElement element)
             => element is not LayoutRootBridge && (element is not Behaviour b || b.isActiveAndEnabled);
 
+        // A raster graphic (Image, RawImage) or a bare LayoutElement can be drawn at any size between two rects;
+        // a graphic that measures itself otherwise (a text) cannot, and takes its size at once as TextBlock does.
+        private bool UguiSizeIsAnimatable()
+        {
+            GetComponents(s_elements);
+            bool animatable = true;
+            for (int i = 0; i < s_elements.Count && animatable; i++)
+            {
+                var element = s_elements[i];
+                if (IsMeasurableElement(element) && element is Graphic && element is not Image && element is not RawImage)
+                    animatable = false;
+            }
+            s_elements.Clear();
+            return animatable;
+        }
+
         private void RegisterGraphicCallbacks()
         {
             _onGraphicLayoutDirty ??= () => LayoutSystem.MarkDirty(this);
@@ -128,6 +144,8 @@ namespace TimboJimbo.UI.Layout
             }
 
             public float MinWidth => _node.UguiProperty(MinimumWidth);
+
+            public bool SizeIsAnimatable => _node.UguiSizeIsAnimatable();
         }
     }
 }
