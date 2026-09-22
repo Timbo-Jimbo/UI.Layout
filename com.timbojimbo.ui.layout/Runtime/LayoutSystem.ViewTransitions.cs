@@ -59,7 +59,8 @@ namespace TimboJimbo.UI.Layout
                 return vt;
             }
 
-            s_current?.SkipTransition();
+            if (s_current != null)
+                InterruptViewTransition(s_current);
             // Settle what is pending first, so the capture is exactly what is on screen.
             FlushMarked();
             Capture(vt);
@@ -262,23 +263,18 @@ namespace TimboJimbo.UI.Layout
                 }
             }
 
-            // Movers: every captured node, not lifted and not a group, that is shown somewhere else now.
+            // Movers: every captured node, not lifted and not a group, that is shown somewhere else now. Where a
+            // move starts comes from the capture alone: the node's captured rect expressed in its parent's
+            // captured frame (or the parent's settled frame when the parent is new), never read back from a
+            // transform, so no order of starting matters. A child that only rode its parent then starts where
+            // it ends and has nothing of its own to do; one that moved as well moves relative to that same frame.
             foreach (var node in s_enabled)
             {
                 if (node == null || node._isPlaceholder || node._lifted || node._captureId != vt.Id || !node._hasCommitted || vt.IsGrouped(node)) continue;
                 var t = vt.TransitionFor(node);
                 if (!t.IsAnimated) continue;
-                var now = LayoutEngine.WorldRect(node.RectTransform);
-                if (LayoutEngine.Approximately(now, node._capturedWorld)) continue;
-                Rect from;
-                if (node.IsRoot)
-                {
-                    // A root's position is not ours; only its size moves, from what it was to what it is.
-                    var scale = node.RectTransform.lossyScale;
-                    from = new Rect(0f, 0f, scale.x != 0f ? node._capturedWorld.width / scale.x : node._capturedWorld.width, scale.y != 0f ? node._capturedWorld.height / scale.y : node._capturedWorld.height);
-                }
-                else
-                    from = LayoutEngine.RelFromWorld(node, node._capturedWorld);
+                if (LayoutEngine.Approximately(LayoutEngine.WorldRect(node.RectTransform), node._capturedWorld)) continue;
+                var from = CapturedStart(vt, node);
                 if (node._measurable != null && !node._measurable.SizeIsAnimatable)
                     from.size = node._committedRect.size;
                 if (LayoutEngine.Approximately(from, node._committedRect)) continue;
@@ -288,6 +284,24 @@ namespace TimboJimbo.UI.Layout
             }
 
             TickFlights(vt, 0f);
+        }
+
+        // The engine-space rect a captured node starts its move from, under the parent it has now: its captured
+        // world rect in that parent's captured frame, or the parent's settled frame when the parent was not captured.
+        private static Rect CapturedStart(ViewTransition vt, LayoutNode node)
+        {
+            var rt = node.RectTransform;
+            if (node.IsRoot)
+            {
+                // A root's position is not ours; only its size moves, from what it was to what it is.
+                var scale = rt.lossyScale;
+                return new Rect(0f, 0f, scale.x != 0f ? node._capturedWorld.width / scale.x : node._capturedWorld.width, scale.y != 0f ? node._capturedWorld.height / scale.y : node._capturedWorld.height);
+            }
+            var parent = (RectTransform)rt.parent;
+            var parentStart = parent.TryGetComponent<LayoutNode>(out var parentNode) && parentNode._captureId == vt.Id
+                ? parentNode._capturedWorld
+                : LayoutEngine.WorldRect(parent);
+            return LayoutEngine.RelIn(parentStart, parent.lossyScale, node._capturedWorld, node.Offset);
         }
 
         private static ViewTransition.SizeRule SizeRuleFor(LayoutNode node, ViewTransition.SizeRule locked) =>
@@ -413,6 +427,57 @@ namespace TimboJimbo.UI.Layout
             layer.SetAsLastSibling();
         }
 
+        // A kept object lands in its copy's slot, whatever became of the tree it left; the copy takes the slot
+        // it left, and goes with that tree if the tree is gone.
+        private static void ReturnKept(LayoutNode kept, LayoutNode copy)
+        {
+            if (!kept._lifted) return;
+            kept._lifted = false;
+            var placeholder = kept._placeholder;
+            kept._placeholder = null;
+            if (copy == null)
+            {
+                // No slot to land in: the new tree is gone, so is the kept object's place.
+                if (placeholder != null)
+                {
+                    kept.transform.SetParent(placeholder.transform.parent, false);
+                    kept.transform.SetSiblingIndex(placeholder.transform.GetSiblingIndex());
+                }
+                else
+                    UnityEngine.Object.Destroy(kept.gameObject);
+                ReleasePlaceholder(placeholder);
+                return;
+            }
+            var slot = copy.transform;
+            var slotParent = slot.parent;
+            int slotIndex = slot.GetSiblingIndex();
+            if (placeholder != null)
+            {
+                copy.transform.SetParent(placeholder.transform.parent, false);
+                copy.transform.SetSiblingIndex(placeholder.transform.GetSiblingIndex());
+            }
+            else
+                UnityEngine.Object.Destroy(copy.gameObject);
+            kept.transform.SetParent(slotParent, false);
+            kept.transform.SetSiblingIndex(slotIndex);
+            LayoutEngine.EndFade(copy);
+            ReleasePlaceholder(placeholder);
+        }
+
+        private static bool TryGetCopy(ViewTransition vt, LayoutNode kept, out LayoutNode copy)
+        {
+            for (int i = 0; i < vt.Swaps.Count; i++)
+            {
+                if (ReferenceEquals(vt.Swaps[i].Kept, kept))
+                {
+                    copy = vt.Swaps[i].Copy;
+                    return true;
+                }
+            }
+            copy = null;
+            return false;
+        }
+
         // Puts a lifted node back in its placeholder's slot; the tree is marked and laid out in the same flush.
         private static void Return(LayoutNode node)
         {
@@ -452,6 +517,8 @@ namespace TimboJimbo.UI.Layout
             return layer;
         }
 
+        // A placeholder stands in for the node in layout: the same slot, the same size, and out of the flow the
+        // same way when the node is one layout skips because it is leaving.
         private static LayoutNode TakePlaceholder(LayoutNode node)
         {
             LayoutNode placeholder = null;
@@ -476,6 +543,7 @@ namespace TimboJimbo.UI.Layout
             placeholder.ParentPoint = node.ParentPoint;
             placeholder.FloatOffset = node.FloatOffset;
             placeholder.Offset = node.Offset;
+            placeholder._exiting = node._exiting;
             var from = node.RectTransform;
             var to = placeholder.RectTransform;
             to.anchorMin = from.anchorMin;
@@ -582,6 +650,7 @@ namespace TimboJimbo.UI.Layout
 
         // ── Finishing ─────────────────────────────────────────────────────────────
 
+        /// <summary>Ends the transition at once, effects included: what <see cref="ViewTransition.SkipTransition"/> does.</summary>
         internal static void SkipViewTransition(ViewTransition vt)
         {
             if (vt == null || vt.IsFinished) return;
@@ -594,6 +663,23 @@ namespace TimboJimbo.UI.Layout
                 if (effect.IsExit && effect.Node != null && effect.Node._exiting)
                     Conclude(effect.Node, effect.Node._exitThen);
             }
+            CompleteViewTransition(vt);
+        }
+
+        // A new transition starting: the one in flight completes its flights and moves, but its enter and exit
+        // effects play on. An effect belongs to its node and touches no layout, and an exit concludes when its
+        // effect reports done whatever became of the transition, so cutting them would only cost the animation.
+        private static void InterruptViewTransition(ViewTransition vt)
+        {
+            if (vt == null || vt.IsFinished) return;
+            for (int i = 0; i < vt.Effects.Count; i++)
+                vt.Effects[i].Done = true;
+            CompleteViewTransition(vt);
+        }
+
+        // Lands every flight and completes every move at once, then finishes.
+        private static void CompleteViewTransition(ViewTransition vt)
+        {
             for (int i = 0; i < vt.Flights.Count; i++)
             {
                 var flight = vt.Flights[i];
@@ -626,7 +712,8 @@ namespace TimboJimbo.UI.Layout
             FinishViewTransition(vt);
         }
 
-        // Every lifted node comes back down into its slot, persisting pairs swap places, fades end, an old half
+        // Every lifted node comes back down: a pair half into its slot, a kept object into its copy's slot (the
+        // copy taking the kept object's old slot, or dying with the tree that slot was in); fades end, an old half
         // that was itself exiting leaves, and the trees touched are laid out in this same flush.
         private static void FinishViewTransition(ViewTransition vt)
         {
@@ -634,13 +721,10 @@ namespace TimboJimbo.UI.Layout
             {
                 var node = vt.Flights[i].Node;
                 if (node == null) continue;
-                Return(node);
-            }
-            for (int i = 0; i < vt.Swaps.Count; i++)
-            {
-                var (kept, copy) = vt.Swaps[i];
-                Swap(kept, copy);
-                if (copy != null) LayoutEngine.EndFade(copy);
+                if (TryGetCopy(vt, node, out var copy))
+                    ReturnKept(node, copy);
+                else
+                    Return(node);
             }
             for (int i = 0; i < vt.Flights.Count; i++)
             {

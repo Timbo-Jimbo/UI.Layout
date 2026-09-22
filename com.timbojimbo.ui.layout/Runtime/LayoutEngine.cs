@@ -192,6 +192,18 @@ namespace TimboJimbo.UI.Layout
             return new Rect(local.x - pr.xMin - offset.x, pr.yMax - local.y - offset.y, size.x, size.y);
         }
 
+        /// <summary>
+        /// A world rect as the engine-space rect it is under a parent whose top-left corner is at
+        /// <paramref name="parentWorld"/>, a frame given rather than read from a transform: how a captured rect is
+        /// expressed in a captured parent frame. <paramref name="offset"/> is the node's Offset, taken out since the write adds it.
+        /// </summary>
+        internal static Rect RelIn(Rect parentWorld, Vector3 scale, Rect world, Vector2 offset)
+        {
+            float sx = scale.x != 0f ? scale.x : 1f, sy = scale.y != 0f ? scale.y : 1f;
+            var o = ToEngine(offset);
+            return new Rect((world.x - parentWorld.x) / sx - o.x, (parentWorld.y - world.y) / sy - o.y, world.width / sx, world.height / sy);
+        }
+
         /// <summary>Where an engine-space rect of a (non-root) node lands on screen under its parent's current frame, in world units.</summary>
         internal static Rect WorldFromRel(LayoutNode n, Rect rel)
         {

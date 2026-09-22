@@ -88,8 +88,9 @@ namespace TimboJimbo.UI.Layout
         /// Takes <paramref name="node"/> out of its tree, the way removing an element inside a web view transition
         /// animates it out: the tree reflows without it at its next pass while the node, still enabled and drawn
         /// where it was, plays its <see cref="IViewTransitionAnimator"/>'s exit, or fades out with the running
-        /// view transition's timing. When that ends <paramref name="onExited"/> runs; without one the object is
-        /// deactivated. Outside a view transition a node with no animator leaves at that pass.
+        /// view transition's timing. When that ends the object is deactivated and <paramref name="onExited"/>
+        /// runs (to destroy it, pool it, or show it again). Outside a view transition a node with no animator
+        /// leaves at that pass.
         /// </summary>
         public static void Exit(LayoutNode node, Action onExited = null)
         {
@@ -267,8 +268,9 @@ namespace TimboJimbo.UI.Layout
                 LayoutEngine.EndFade(node);
         }
 
-        // The node has left: its exit state is cleared, its fade is put back for its next showing, and the
-        // caller's callback runs or the object is deactivated.
+        // The node has left: its exit state is cleared, its fade is put back for its next showing, the object is
+        // deactivated (so it is off screen at once, whatever the callback does with it; a Destroy would only take
+        // effect at the end of the frame) and the caller's callback runs.
         private static void Conclude(LayoutNode node, Action then)
         {
             node._exiting = false;
@@ -278,10 +280,8 @@ namespace TimboJimbo.UI.Layout
             node._animating = false;
             LayoutEngine.EndFade(node);
             RemoveExiting(node);
-            if (then != null)
-                then();
-            else
-                node.gameObject.SetActive(false);
+            node.gameObject.SetActive(false);
+            then?.Invoke();
         }
 
         private static void RemoveExiting(LayoutNode node)
