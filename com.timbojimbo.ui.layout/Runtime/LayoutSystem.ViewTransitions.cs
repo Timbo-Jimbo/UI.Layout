@@ -268,9 +268,11 @@ namespace TimboJimbo.UI.Layout
             // captured frame (or the parent's settled frame when the parent is new), never read back from a
             // transform, so no order of starting matters. A child that only rode its parent then starts where
             // it ends and has nothing of its own to do; one that moved as well moves relative to that same frame.
+            // A root never moves: its rect is the tree's contract with whatever holds it (a ScrollRect, a UGUI
+            // parent), which reads the transform at once, as the document's own size changes at once on the web.
             foreach (var node in s_enabled)
             {
-                if (node == null || node._isPlaceholder || node._lifted || node._captureId != vt.Id || !node._hasCommitted || vt.IsGrouped(node)) continue;
+                if (node == null || node._isPlaceholder || node._lifted || node.IsRoot || node._captureId != vt.Id || !node._hasCommitted || vt.IsGrouped(node)) continue;
                 var t = vt.TransitionFor(node);
                 if (!t.IsAnimated) continue;
                 if (LayoutEngine.Approximately(LayoutEngine.WorldRect(node.RectTransform), node._capturedWorld)) continue;
@@ -286,17 +288,11 @@ namespace TimboJimbo.UI.Layout
             TickFlights(vt, 0f);
         }
 
-        // The engine-space rect a captured node starts its move from, under the parent it has now: its captured
-        // world rect in that parent's captured frame, or the parent's settled frame when the parent was not captured.
+        // The engine-space rect a captured (non-root) node starts its move from, under the parent it has now: its
+        // captured world rect in that parent's captured frame, or the parent's settled frame when the parent was not captured.
         private static Rect CapturedStart(ViewTransition vt, LayoutNode node)
         {
             var rt = node.RectTransform;
-            if (node.IsRoot)
-            {
-                // A root's position is not ours; only its size moves, from what it was to what it is.
-                var scale = rt.lossyScale;
-                return new Rect(0f, 0f, scale.x != 0f ? node._capturedWorld.width / scale.x : node._capturedWorld.width, scale.y != 0f ? node._capturedWorld.height / scale.y : node._capturedWorld.height);
-            }
             var parent = (RectTransform)rt.parent;
             var parentStart = parent.TryGetComponent<LayoutNode>(out var parentNode) && parentNode._captureId == vt.Id
                 ? parentNode._capturedWorld
