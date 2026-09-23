@@ -25,10 +25,11 @@ namespace TimboJimbo.UI.Layout
         public static readonly PropertyDescriptor<LayoutNode, LayoutDirection> Direction = Scalar<LayoutDirection>("timbojimbo.layoutNode.direction", "_direction", ValueKind.Enum);
         public static readonly PropertyDescriptor<LayoutNode, AlignX> AlignX = Scalar<AlignX>("timbojimbo.layoutNode.alignX", "_alignX", ValueKind.Enum);
         public static readonly PropertyDescriptor<LayoutNode, AlignY> AlignY = Scalar<AlignY>("timbojimbo.layoutNode.alignY", "_alignY", ValueKind.Enum);
+        public static readonly PropertyDescriptor<LayoutNode, AlignSelf> AlignSelf = Scalar<AlignSelf>("timbojimbo.layoutNode.alignSelf", "_alignSelf", ValueKind.Enum);
 
         internal static readonly IPropertyDescriptor[] All =
         {
-            Offset, FloatOffset, Padding, Gap, AspectRatio, WidthValue, HeightValue, Direction, AlignX, AlignY,
+            Offset, FloatOffset, Padding, Gap, AspectRatio, WidthValue, HeightValue, Direction, AlignX, AlignY, AlignSelf,
         };
 
         private static PropertyDescriptor<LayoutNode, Vector2> Vector2Descriptor(string id, string path) => new(
@@ -67,6 +68,7 @@ namespace TimboJimbo.UI.Layout
             else if (LayoutNodeProperties.Direction.Matches(property)) resolved = Property.Direction;
             else if (LayoutNodeProperties.AlignX.Matches(property)) resolved = Property.AlignX;
             else if (LayoutNodeProperties.AlignY.Matches(property)) resolved = Property.AlignY;
+            else if (LayoutNodeProperties.AlignSelf.Matches(property)) resolved = Property.AlignSelf;
             else
             {
                 node = null;
@@ -99,6 +101,7 @@ namespace TimboJimbo.UI.Layout
                 case Property.Direction: value = ValueContainer.FromEnum(_node.Direction); break;
                 case Property.AlignX: value = ValueContainer.FromEnum(_node.AlignX); break;
                 case Property.AlignY: value = ValueContainer.FromEnum(_node.AlignY); break;
+                case Property.AlignSelf: value = ValueContainer.FromEnum(_node.AlignSelf); break;
                 default: return false;
             }
             return true;
@@ -131,6 +134,7 @@ namespace TimboJimbo.UI.Layout
                 case Property.Direction: _node.Direction = (LayoutDirection)value.EnumValue; break;
                 case Property.AlignX: _node.AlignX = (AlignX)value.EnumValue; break;
                 case Property.AlignY: _node.AlignY = (AlignY)value.EnumValue; break;
+                case Property.AlignSelf: _node.AlignSelf = (AlignSelf)value.EnumValue; break;
                 default: return false;
             }
             return true;
@@ -148,6 +152,7 @@ namespace TimboJimbo.UI.Layout
             Direction,
             AlignX,
             AlignY,
+            AlignSelf,
         }
     }
 

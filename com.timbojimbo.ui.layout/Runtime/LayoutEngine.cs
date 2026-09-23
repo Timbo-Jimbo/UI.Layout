@@ -22,6 +22,9 @@ namespace TimboJimbo.UI.Layout
         /// <summary>Number of passes computed since load; tests use it to check that clean frames do no work.</summary>
         internal static int PassCount { get; private set; }
 
+        /// <summary>The nodes of the last computed pass, a parent before its subtree; valid until the next Compute.</summary>
+        internal static List<LayoutNode> PassNodes => s_all;
+
         /// <summary>
         /// Lays out the tree under <paramref name="root"/>. <paramref name="available"/> is the size the root
         /// has to work with on an axis whose sizing is Grow or Percent (normally its rect size). Returns the
@@ -60,6 +63,15 @@ namespace TimboJimbo.UI.Layout
         {
             root._tracker.Clear();
 
+            // A node arrives on its first layout in this enabled span when its parent was already shown: the
+            // topmost node of a subtree that appeared. Read before any node of the pass is marked shown.
+            for (int i = 1; i < s_all.Count; i++)
+            {
+                var n = s_all[i];
+                n._arriving = !n._shown && n._parentNode._shown && !n._settled;
+            }
+            root._shown = true;
+
             var rootRect = root.RectTransform;
             if (root.Width.Mode is SizingMode.Fit or SizingMode.Fixed)
                 root._tracker.Add(root, rootRect, DrivenTransformProperties.SizeDeltaX);
@@ -97,6 +109,7 @@ namespace TimboJimbo.UI.Layout
             }
             n._committedRect = target;
             n._hasCommitted = true;
+            n._shown = true;
             Write(n, n._animating ? n.CurrentVisual() : target);
         }
 
@@ -108,6 +121,12 @@ namespace TimboJimbo.UI.Layout
             n._animElapsed = 0f;
             n._animTransition = transition;
             n._animating = true;
+            // A move starts with its contents in their old state; what rides inside it follows its morph from here.
+            n._lookMorph = 0f;
+            n._ridesOn = null;
+            // A fade riding on the move goes on from the alpha it has reached, rather than starting over.
+            if (n._fadeGroup != null)
+                n._fadeFrom = n._fadeGroup.alpha;
             LayoutSystem.RegisterAnimating(n);
         }
 
@@ -115,19 +134,91 @@ namespace TimboJimbo.UI.Layout
         {
             n._animating = false;
             EndFade(n);
+            ResetLook(n);
+        }
+
+        /// <summary>
+        /// Sets the look a motion's frame gives a node: its scale, applied around the centre by the next
+        /// <see cref="Write"/>, its opacity, applied by the next <see cref="WriteAlpha"/>, and its morph.
+        /// </summary>
+        internal static void SetLook(LayoutNode n, in MotionFrame frame)
+        {
+            n._lookScale = frame.Scale;
+            n._lookOpacity = frame.Opacity;
+            n._lookMorph = frame.Morph;
+        }
+
+        /// <summary>
+        /// Writes the node's opacity, the one place it is written while a node moves: its fade at
+        /// <paramref name="fade"/> (0 where the fade starts, 1 where it ends; for a half of a pair, the frame's
+        /// morph) times its look's opacity.
+        /// </summary>
+        internal static void WriteAlpha(LayoutNode n, float fade)
+        {
+            if (n._fadeGroup != null)
+            {
+                n._fadeGroup.alpha = Mathf.Lerp(n._fadeFrom, n._fadeTo, fade) * n._lookOpacity;
+                return;
+            }
+            if (n._lookOpacity >= 1f && n._lookGroup == null)
+                return;
+            if (n._lookGroup == null)
+            {
+                if (!n.TryGetComponent(out n._lookGroup))
+                    n._lookGroup = n.gameObject.AddComponent<CanvasGroup>();
+                n._lookRestore = n._lookGroup.alpha;
+            }
+            n._lookGroup.alpha = n._lookRestore * n._lookOpacity;
+        }
+
+        /// <summary>Takes a motion's look off the node when its move ends: full scale, and the opacity it had.</summary>
+        internal static void ResetLook(LayoutNode n)
+        {
+            bool scaled = n._lookScaled;
+            n._lookScale = 1f;
+            n._lookOpacity = 1f;
+            n._lookMorph = 1f;
+            n._lookScaled = false;
+            if (scaled)
+            {
+                var r = n.RectTransform;
+                r.localScale = Vector3.one;
+                if (n._hasCommitted || n._lifted)
+                    r.anchoredPosition = n._committedBase + n.Offset;
+            }
+            if (n._lookGroup != null)
+            {
+                if (n._fadeGroup == null)
+                    n._lookGroup.alpha = n._lookRestore;
+                n._lookGroup = null;
+            }
+        }
+
+        /// <summary>
+        /// How far a node scaled by its look is shifted so it scales around its centre rather than its pivot, in
+        /// anchoredPosition terms (y up), for a rect of <paramref name="size"/>.
+        /// </summary>
+        internal static Vector2 LookShift(LayoutNode n, Vector2 size)
+        {
+            float s = n._lookScale;
+            if (Mathf.Approximately(s, 1f)) return Vector2.zero;
+            var pivot = n.RectTransform.pivot;
+            return new Vector2((0.5f - pivot.x) * size.x, (0.5f - pivot.y) * size.y) * (1f - s);
         }
 
         /// <summary>
         /// Fades the node's CanvasGroup, adding one the first time the object needs it: in, from invisible up to the
         /// alpha it has, or out, from that alpha to invisible, driven by the move's eased progress so the crossover
-        /// of a pair rides the motion whichever way a transition runs. <paramref name="passThrough"/> lets clicks
-        /// through a node on its way out. <see cref="EndFade"/> puts the group back; the group stays on the object.
+        /// of a pair rides the motion whichever way a transition runs. A node already fading goes on from where its
+        /// fade has got to. <paramref name="passThrough"/> lets clicks through a node on its way out.
+        /// <see cref="EndFade"/> puts the group back; the group stays on the object.
         /// </summary>
         internal static void StartFade(LayoutNode n, bool fadeIn, bool passThrough = false)
         {
+            float? current = n._fadeGroup != null ? n._fadeGroup.alpha : null;
             var group = TakeGroup(n, passThrough);
             float shown = group.alpha;
-            n._fadeFrom = fadeIn ? 0f : shown;
+            n._fadeFrom = current ?? (fadeIn ? 0f : shown);
             n._fadeTo = fadeIn ? shown : 0f;
             n._fadeRestore = shown;
             group.alpha = n._fadeFrom;
@@ -144,7 +235,7 @@ namespace TimboJimbo.UI.Layout
 
         private static CanvasGroup TakeGroup(LayoutNode n, bool passThrough)
         {
-            EndFade(n);
+            ReleaseFade(n);
             if (!n.TryGetComponent(out CanvasGroup group))
                 group = n.gameObject.AddComponent<CanvasGroup>();
             n._fadeGroup = group;
@@ -156,8 +247,46 @@ namespace TimboJimbo.UI.Layout
             return group;
         }
 
-        /// <summary>Ends a fade or a hide: the group shows at the value it had and stays on the object for the next one.</summary>
+        /// <summary>
+        /// Ends a fade or a hide: the group shows at the value it had and stays on the object for the next one. A
+        /// node hidden by <see cref="LayoutSystem.Hide"/> then rests unseen (<see cref="Conceal"/>).
+        /// </summary>
         internal static void EndFade(LayoutNode n)
+        {
+            ReleaseFade(n);
+            if (n._hidden)
+                Conceal(n);
+        }
+
+        /// <summary>
+        /// Rests a hidden node unseen: its CanvasGroup, added if it has none, goes to 0 and lets clicks through, what
+        /// it had kept for <see cref="Reveal"/>. Only while playing: the editor goes on drawing a hidden node.
+        /// </summary>
+        internal static void Conceal(LayoutNode n)
+        {
+            if (n._concealed || !Application.isPlaying) return;
+            if (!n.TryGetComponent(out CanvasGroup group))
+                group = n.gameObject.AddComponent<CanvasGroup>();
+            n._concealed = true;
+            n._concealRestore = group.alpha;
+            n._concealBlocked = group.blocksRaycasts;
+            group.alpha = 0f;
+            group.blocksRaycasts = false;
+        }
+
+        /// <summary>Shows a concealed node again: its CanvasGroup goes back to what it had.</summary>
+        internal static void Reveal(LayoutNode n)
+        {
+            if (!n._concealed) return;
+            n._concealed = false;
+            if (!n.TryGetComponent(out CanvasGroup group)) return;
+            group.alpha = n._concealRestore;
+            if (n._concealBlocked)
+                group.blocksRaycasts = true;
+        }
+
+        // Puts a fade's group back as it was: for a fade that ends, and before one that takes over from it.
+        private static void ReleaseFade(LayoutNode n)
         {
             var group = n._fadeGroup;
             n._fadeGroup = null;
@@ -242,7 +371,19 @@ namespace TimboJimbo.UI.Layout
                 r.sizeDelta = rect.size;
                 var pivot = r.pivot;
                 n._committedBase = new Vector2(rect.x + rect.width * pivot.x, -(rect.y + rect.height * (1f - pivot.y)));
-                r.anchoredPosition = n._committedBase + n.Offset;
+                // A motion's scale is around the centre: the transform scales around its pivot, so shift to make up.
+                // The transform's scale is only touched while a motion has it, so a game's own scale is left alone.
+                if (!Mathf.Approximately(n._lookScale, 1f))
+                {
+                    r.localScale = new Vector3(n._lookScale, n._lookScale, 1f);
+                    n._lookScaled = true;
+                }
+                else if (n._lookScaled)
+                {
+                    r.localScale = Vector3.one;
+                    n._lookScaled = false;
+                }
+                r.anchoredPosition = n._committedBase + n.Offset + LookShift(n, rect.size);
             }
             n._visualRect = rect;
         }
@@ -374,10 +515,20 @@ namespace TimboJimbo.UI.Layout
                     minFit += pad;
                 }
 
-                if (axis == 1 && n.AspectRatio > 0f && n.Height.Mode == SizingMode.Fit)
+                // An aspect ratio derives a Fit height from the width, or, when only the height is known up front
+                // (Fixed; widths are settled before heights), a Fit width from the height.
+                if (n.AspectRatio > 0f)
                 {
-                    fit = n._size.x / n.AspectRatio;
-                    minFit = fit;
+                    if (axis == 1 && n.Height.Mode == SizingMode.Fit)
+                    {
+                        fit = n._size.x / n.AspectRatio;
+                        minFit = fit;
+                    }
+                    else if (axis == 0 && n.Width.Mode == SizingMode.Fit && n.Height.Mode == SizingMode.Fixed)
+                    {
+                        fit = n.Height.Value * n.AspectRatio;
+                        minFit = fit;
+                    }
                 }
 
                 var sizing = n.SizingOn(axis);
@@ -410,11 +561,12 @@ namespace TimboJimbo.UI.Layout
                         SizeAcross(n, axis, inner);
                 }
 
-                // Floating children size against their parent's inner size, whatever they attach to; a Fit
-                // one keeps its own fit, since it is not confined to the parent.
+                // Floating children size against their parent's whole rect, padding included (the rect their attach
+                // points are placed on, as CSS sizes an absolutely positioned box against the padding box), whatever
+                // they attach to; a Fit one keeps its own fit, since it is not confined to the parent.
                 var floating = n._floatingChildren;
                 for (int f = 0; f < floating.Count; f++)
-                    floating[f]._size[axis] = ResolveFloating(floating[f], axis, inner);
+                    floating[f]._size[axis] = ResolveFloating(floating[f], axis, n._size[axis]);
             }
         }
 
@@ -432,14 +584,14 @@ namespace TimboJimbo.UI.Layout
             };
         }
 
-        private static float ResolveFloating(LayoutNode c, int axis, float inner)
+        private static float ResolveFloating(LayoutNode c, int axis, float parentSize)
         {
             var s = c.SizingOn(axis);
             return s.Mode switch
             {
                 SizingMode.Fixed => s.Value,
-                SizingMode.Percent => inner * s.Value,
-                SizingMode.Grow => s.Clamp(inner),
+                SizingMode.Percent => parentSize * s.Value,
+                SizingMode.Grow => s.Clamp(parentSize),
                 _ => c._fit[axis],
             };
         }
@@ -606,13 +758,19 @@ namespace TimboJimbo.UI.Layout
                 for (int c = 0; c < children.Count; c++)
                     total += children[c]._size[along];
 
-                float cursor = n.PaddingStart(along) + n.AlignFraction(along) * (innerAlong - total);
+                // SpaceBetween shares the free space out between the children, on top of the gap; with one child
+                // or nothing to share it sits at the start.
+                float free = innerAlong - total;
+                bool spread = n.SpreadsAlong(along) && children.Count > 1 && free > Epsilon;
+                float step = spread ? free / (children.Count - 1) : 0f;
+                float cursor = n.PaddingStart(along) + (spread ? 0f : n.AlignFraction(along) * free);
                 for (int c = 0; c < children.Count; c++)
                 {
                     var child = children[c];
+                    float acrossFraction = child.AlignSelf == AlignSelf.Auto ? n.AlignFraction(across) : child.AlignSelfFraction();
                     child._pos[along] = cursor;
-                    child._pos[across] = n.PaddingStart(across) + n.AlignFraction(across) * (innerAcross - child._size[across]);
-                    cursor += child._size[along] + n.Gap;
+                    child._pos[across] = n.PaddingStart(across) + acrossFraction * (innerAcross - child._size[across]);
+                    cursor += child._size[along] + n.Gap + step;
                 }
             }
 
@@ -629,9 +787,18 @@ namespace TimboJimbo.UI.Layout
                 var target = parent;
                 if (n.AttachTo == AttachTo.Root)
                     target = root;
-                else if (n.AttachTo == AttachTo.Element && n.AttachElement != null
-                         && n.AttachElement.TryGetComponent<LayoutNode>(out var element) && ReferenceEquals(element._passRoot, root))
-                    target = element;
+                else if (n.AttachTo == AttachTo.Element && n.AttachElement != null)
+                {
+                    if (n.AttachElement.TryGetComponent<LayoutNode>(out var element) && ReferenceEquals(element._passRoot, root))
+                        target = element;
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                    else if (!n._warnedAttach)
+                    {
+                        n._warnedAttach = true;
+                        Debug.LogWarning($"[UI.Layout] '{n.name}' attaches to '{n.AttachElement.name}', which is not a node in the same layout tree, so it floats against its parent instead.", n);
+                    }
+#endif
+                }
 
                 var targetPoint = target._absPos + Point(n.ParentPoint, target._size);
                 n._absPos = targetPoint - Point(n.ElementPoint, n._size) + n.FloatOffset;

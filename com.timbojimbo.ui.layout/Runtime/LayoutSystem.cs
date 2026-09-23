@@ -8,9 +8,9 @@ namespace TimboJimbo.UI.Layout
     /// <summary>
     /// Schedules layout. Nodes marked dirty have their trees laid out on <see cref="Canvas.preWillRenderCanvases"/>,
     /// in edit and play mode, which is just before UGUI's own rebuild, so the graphics a commit resizes rebuild in
-    /// the same frame. <see cref="ForceLayout"/> settles a tree immediately. <see cref="StartViewTransition"/>
-    /// animates one update as a whole (see <c>LayoutSystem.ViewTransitions.cs</c>) and <see cref="Exit"/> takes a
-    /// node out with an animation. The static state is reset on every play mode transition; the event subscription
+    /// the same frame. <see cref="ForceLayout"/> settles a tree immediately. <c>StartViewTransition</c>
+    /// animates one update as a whole (see <c>LayoutSystem.ViewTransitions.cs</c>), <see cref="Exit"/> takes a
+    /// node out with an animation, <see cref="Hide"/> hides one in its place and <see cref="Show"/> brings one back. The static state is reset on every play mode transition; the event subscription
     /// is made once per domain and kept.
     /// </summary>
     [AutoStaticsCleanup]
@@ -24,6 +24,7 @@ namespace TimboJimbo.UI.Layout
         private static readonly List<LayoutNode> s_roots = new();
         private static readonly List<LayoutNode> s_animating = new();
         private static readonly List<LayoutNode> s_exiting = new();
+        private static readonly List<LayoutNode> s_arrivals = new();
         private static readonly System.Comparison<LayoutNode> s_byDepth = (a, b) => Depth(a).CompareTo(Depth(b));
 
         // The root whose pass or transition tick is writing transforms right now. Those writes dirty the graphics
@@ -90,7 +91,8 @@ namespace TimboJimbo.UI.Layout
         /// where it was, plays its <see cref="IViewTransitionAnimator"/>'s exit, or fades out with the running
         /// view transition's timing. When that ends the object is deactivated and <paramref name="onExited"/>
         /// runs (to destroy it, pool it, or show it again). Outside a view transition a node with no animator
-        /// leaves at that pass.
+        /// leaves at that pass. <see cref="Show"/> calls a leaving node back. Deactivating a node inside a view
+        /// transition cannot animate it (a disabled object is not drawn); use this instead.
         /// </summary>
         public static void Exit(LayoutNode node, Action onExited = null)
         {
@@ -114,6 +116,13 @@ namespace TimboJimbo.UI.Layout
         /// </summary>
         public static bool UseScaledTime { get; set; }
 
+        /// <summary>
+        /// This frame's step for view transitions: <see cref="Time.deltaTime"/> or <see cref="Time.unscaledDeltaTime"/>
+        /// as <see cref="UseScaledTime"/> says. An <see cref="IViewTransitionAnimator"/> that advances its effect by
+        /// this stays in step with the moves, so <see cref="ViewTransition.Finished"/> never waits on a frozen clock.
+        /// </summary>
+        public static float DeltaTime => UseScaledTime ? Time.deltaTime : Time.unscaledDeltaTime;
+
         internal static bool IsCommitting(LayoutNode root) => ReferenceEquals(s_committing, root);
 
         /// <summary>Number of nodes currently moving through a transition; a test seam.</summary>
@@ -133,11 +142,11 @@ namespace TimboJimbo.UI.Layout
         {
             if (s_reloading) return;
             FlushMarked();
-            float deltaTime = UseScaledTime ? Time.deltaTime : Time.unscaledDeltaTime;
+            float deltaTime = DeltaTime;
             TickTransitions(deltaTime);
-            if (s_current != null)
-                TickFlights(s_current, deltaTime);
-            FinishSettledViewTransition();
+            for (int i = 0; i < s_active.Count; i++)
+                TickFlights(s_active[i], deltaTime);
+            FinishSettledViewTransitions();
             // A finish brings lifted nodes back into their trees: those lay out now, not a frame later.
             if (s_marked.Count > 0)
                 FlushMarked();
@@ -181,22 +190,24 @@ namespace TimboJimbo.UI.Layout
             {
                 LayoutEngine.Compute(root, root.RectTransform.rect.size);
                 LayoutEngine.Commit(root);
-                // Inside a view transition's update the exits wait for its animation step, which lifts and fades them.
-                if (s_updating == null)
-                    StartExits(root);
             }
             finally
             {
                 s_committing = null;
             }
+            // Effects are started once the pass is written, so what they set (an Offset, a padding) is theirs.
+            StartArrivals();
+            StartExits(root);
         }
 
-        // Outside a view transition, nodes leaving this tree go in the pass that first reflows the tree without
-        // them: an animator on the object plays the exit effect, otherwise the node leaves at once.
+        // Outside a view transition (or outside the scope of the one whose update is running, which starts its
+        // own), nodes leaving this tree go in the pass that first reflows the tree without them: an animator on
+        // the object plays the exit effect, otherwise the node leaves at once.
         private static void StartExits(LayoutNode root)
         {
             for (int i = s_exiting.Count - 1; i >= 0; i--)
             {
+                if (i >= s_exiting.Count) continue;
                 var node = s_exiting[i];
                 if (node == null || !node._exiting)
                 {
@@ -205,6 +216,8 @@ namespace TimboJimbo.UI.Layout
                 }
                 if (node._exitStarted || !ReferenceEquals(node.Root, root))
                     continue;
+                if (s_updating != null && InScope(s_updating, node))
+                    continue;
 
                 node._exitStarted = true;
                 if (node.TryGetComponent(out IViewTransitionAnimator animator))
@@ -212,6 +225,31 @@ namespace TimboJimbo.UI.Layout
                 else
                     Conclude(node, node._exitThen);
             }
+        }
+
+        // The mirror of an exit outside a view transition: the topmost node of a subtree that has just appeared
+        // under a node already shown plays its animator's enter (with no transition; without an animator it simply
+        // appears). A scene's first layout arrives nowhere, since nothing was shown before it, and neither do nodes
+        // enabled inside Settle. Inside a view transition's update the transition enters the nodes of its scope.
+        private static void StartArrivals()
+        {
+            // Collected first: an animator's Enter may run another pass, which reuses the pass list.
+            var nodes = LayoutEngine.PassNodes;
+            for (int i = 1; i < nodes.Count; i++)
+            {
+                var node = nodes[i];
+                if (!node._arriving) continue;
+                node._arriving = false;
+                if (s_updating != null && InScope(s_updating, node)) continue;
+                s_arrivals.Add(node);
+            }
+            for (int i = 0; i < s_arrivals.Count; i++)
+            {
+                var node = s_arrivals[i];
+                if (node != null && node.TryGetComponent(out IViewTransitionAnimator animator))
+                    RunEnterEffect(node, animator, null);
+            }
+            s_arrivals.Clear();
         }
 
         // Advances every in-place move, writes the eased rect and drives the fade riding on it.
@@ -238,9 +276,11 @@ namespace TimboJimbo.UI.Layout
                 s_committing = node._passRoot;
                 try
                 {
-                    LayoutEngine.Write(node, node.CurrentVisual());
-                    if (node._fadeGroup != null)
-                        node._fadeGroup.alpha = Mathf.Lerp(node._fadeFrom, node._fadeTo, node.EasedProgress());
+                    // The move's frame: where its motion has it, how big, and how it looks.
+                    var frame = node.CurrentFrame();
+                    LayoutEngine.SetLook(node, frame);
+                    LayoutEngine.Write(node, new Rect(frame.Centre - frame.Size * 0.5f, frame.Size));
+                    LayoutEngine.WriteAlpha(node, node.EasedProgress());
                 }
                 finally
                 {
@@ -252,6 +292,7 @@ namespace TimboJimbo.UI.Layout
         // Puts a node at the end of its move: an exiting node leaves, any other rests there with its fade ended.
         private static void CompleteMove(LayoutNode node)
         {
+            LayoutEngine.ResetLook(node);
             s_committing = node._passRoot;
             try
             {

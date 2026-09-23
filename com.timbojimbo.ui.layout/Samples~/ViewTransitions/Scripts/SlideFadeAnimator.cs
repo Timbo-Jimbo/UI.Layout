@@ -46,7 +46,7 @@ namespace TimboJimbo.UI.Layout.Samples.ViewTransitions
 
         private IEnumerator Run(Vector2 offsetFrom, Vector2 offsetTo, float alphaFrom, float alphaTo, Action done)
         {
-            for (float elapsed = 0f; elapsed < Duration; elapsed += Time.deltaTime)
+            for (float elapsed = 0f; elapsed < Duration; elapsed += LayoutSystem.DeltaTime)
             {
                 float t = elapsed / Duration;
                 float eased = 1f - (1f - t) * (1f - t) * (1f - t);   // ease out cubic

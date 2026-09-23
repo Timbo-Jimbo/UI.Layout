@@ -11,6 +11,11 @@
 	},
 	"samples": [
 		{
+			"displayName": "Hello Layout",
+			"description": "Start here: one small scene with a list, a row of tabs and three buttons. Each button makes one change inside a view transition (add a row, remove a row, turn the list on its side) and a tab moves the highlight, so you can see the README's first recipes working.",
+			"path": "Samples~/HelloLayout"
+		},
+		{
 			"displayName": "Layout",
 			"description": "A showcase scene: the sizing modes, alignment, shrink and wrap, floating, aspect ratio and a scrolling list, with buttons that add rows, flip a direction, change a gap and pulse an Offset.",
 			"path": "Samples~/Layout"

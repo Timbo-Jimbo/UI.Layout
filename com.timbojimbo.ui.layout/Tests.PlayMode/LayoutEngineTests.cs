@@ -1,6 +1,7 @@
 using NUnit.Framework;
 using TimboJimbo.UI.Layout;
 using UnityEngine;
+using UnityEngine.TestTools;
 using UnityEngine.UI;
 
 namespace TimboJimboTests.UI.Layout.PlayMode
@@ -249,6 +250,22 @@ namespace TimboJimboTests.UI.Layout.PlayMode
         }
 
         [Test]
+        public void Floating_PercentAndGrowSizeAgainstTheParentsWholeRect_PaddingIncluded()
+        {
+            var root = Root(200f, 100f, LayoutDirection.LeftToRight);
+            var button = Node(root.transform, "Button", Sizing.Fixed(120f), Sizing.Fixed(40f));
+            button.Padding = Insets.Symmetric(24f, 8f);
+            var highlight = Node(button.transform, "Highlight", Sizing.Percent(1f), Sizing.Grow());
+            highlight.AttachTo = AttachTo.Parent;
+            Node(button.transform, "Label", Sizing.Fixed(40f), Sizing.Fixed(20f));
+
+            LayoutSystem.ForceLayout(root);
+
+            AssertVector(Size(highlight), 120f, 40f);
+            AssertVector(Pos(highlight), 0f, 0f);
+        }
+
+        [Test]
         public void AspectRatio_DerivesFitHeightFromWidth()
         {
             var root = Root(200f, 200f, LayoutDirection.TopToBottom);
@@ -409,6 +426,91 @@ namespace TimboJimboTests.UI.Layout.PlayMode
 
             Object.DestroyImmediate(image.sprite);
             Object.DestroyImmediate(texture);
+        }
+
+        [Test]
+        public void SpaceBetween_SharesTheFreeSpaceBetweenChildren_OnTopOfTheGap_AndIsStartAcross()
+        {
+            var root = Root(200f, 100f, LayoutDirection.LeftToRight);
+            root.Padding = Insets.Of(left: 10f, right: 10f);
+            root.Gap = 10f;
+            root.AlignX = AlignX.SpaceBetween;
+            var a = Node(root.transform, "A", Sizing.Fixed(20f), Sizing.Fixed(20f));
+            var b = Node(root.transform, "B", Sizing.Fixed(20f), Sizing.Fixed(20f));
+            var c = Node(root.transform, "C", Sizing.Fixed(20f), Sizing.Fixed(20f));
+
+            LayoutSystem.ForceLayout(root);
+
+            // Inner 180, children 60 and gaps 20: 100 free, 50 more between each pair.
+            AssertVector(Pos(a), 10f, 0f);
+            AssertVector(Pos(b), 90f, 0f);
+            AssertVector(Pos(c), 170f, 0f);
+
+            var column = Root(100f, 200f, LayoutDirection.TopToBottom);
+            column.AlignX = AlignX.SpaceBetween;
+            column.AlignY = AlignY.SpaceBetween;
+            var only = Node(column.transform, "Only", Sizing.Fixed(20f), Sizing.Fixed(20f));
+            LayoutSystem.ForceLayout(column);
+            AssertVector(Pos(only), 0f, 0f);
+        }
+
+        [Test]
+        public void AlignSelf_OverridesTheParentsAlignmentAcrossTheFlow()
+        {
+            var row = Root(200f, 100f, LayoutDirection.LeftToRight);
+            row.AlignY = AlignY.Top;
+            var a = Node(row.transform, "A", Sizing.Fixed(20f), Sizing.Fixed(20f));
+            var b = Node(row.transform, "B", Sizing.Fixed(20f), Sizing.Fixed(20f));
+            var c = Node(row.transform, "C", Sizing.Fixed(20f), Sizing.Fixed(20f));
+            b.AlignSelf = AlignSelf.Center;
+            c.AlignSelf = AlignSelf.End;
+
+            LayoutSystem.ForceLayout(row);
+
+            AssertVector(Pos(a), 0f, 0f);
+            AssertVector(Pos(b), 20f, -40f);
+            AssertVector(Pos(c), 40f, -80f);
+
+            var column = Root(200f, 100f, LayoutDirection.TopToBottom);
+            column.AlignX = AlignX.Center;
+            var d = Node(column.transform, "D", Sizing.Fixed(20f), Sizing.Fixed(20f));
+            d.AlignSelf = AlignSelf.End;
+            LayoutSystem.ForceLayout(column);
+            AssertVector(Pos(d), 180f, 0f);
+        }
+
+        [Test]
+        public void AspectRatio_DerivesAFitWidthFromAFixedHeight()
+        {
+            var row = Root(400f, 100f, LayoutDirection.LeftToRight);
+            var thumb = Node(row.transform, "Thumb", Sizing.Fit(), Sizing.Fixed(60f));
+            thumb.AspectRatio = 1.5f;
+            var next = Node(row.transform, "Next", Sizing.Fixed(20f), Sizing.Fixed(20f));
+
+            LayoutSystem.ForceLayout(row);
+
+            AssertVector(Size(thumb), 90f, 60f);
+            AssertVector(Pos(next), 90f, 0f);
+        }
+
+        [Test]
+        public void Floating_AnAttachElementOutsideTheTreeFallsBackToTheParent_WithOneWarning()
+        {
+            var root = Root(100f, 100f, LayoutDirection.TopToBottom);
+            var host = Node(root.transform, "Host", Sizing.Fixed(40f), Sizing.Fixed(20f));
+            var tip = Node(host.transform, "Tip", Sizing.Fixed(10f), Sizing.Fixed(10f));
+            var elsewhere = Node(_canvas.transform, "Elsewhere", Sizing.Fixed(10f), Sizing.Fixed(10f));
+            tip.AttachTo = AttachTo.Element;
+            tip.AttachElement = elsewhere.RectTransform;
+            tip.ParentPoint = AttachPoint.RightTop;
+
+            LogAssert.Expect(LogType.Warning, new System.Text.RegularExpressions.Regex("not a node in the same layout tree"));
+            LayoutSystem.ForceLayout(root);
+            AssertVector(Pos(tip), 40f, 0f);
+
+            root.Gap = 1f;
+            LayoutSystem.ForceLayout(root);
+            LogAssert.NoUnexpectedReceived();
         }
     }
 }

@@ -1,0 +1,17 @@
+{
+    "name": "TimboJimbo.UI.Layout.Samples.HelloLayout",
+    "rootNamespace": "TimboJimbo.UI.Layout.Samples.HelloLayout",
+    "references": [
+        "TimboJimbo.UI.Layout.Runtime",
+        "UnityEngine.UI"
+    ],
+    "includePlatforms": [],
+    "excludePlatforms": [],
+    "allowUnsafeCode": false,
+    "overrideReferences": false,
+    "precompiledReferences": [],
+    "autoReferenced": true,
+    "defineConstraints": [],
+    "versionDefines": [],
+    "noEngineReferences": false
+}

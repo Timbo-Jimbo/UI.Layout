@@ -17,16 +17,18 @@ namespace TimboJimbo.UI.Layout
     [RequireComponent(typeof(RectTransform))]
     [ExecuteAlways]
     [DisallowMultipleComponent]
-    public sealed partial class LayoutNode : UIBehaviour
+    public sealed partial class LayoutNode : UIBehaviour, ISerializationCallbackReceiver
     {
         [SerializeField] private Sizing _width = Sizing.Fit();
         [SerializeField] private Sizing _height = Sizing.Fit();
         [SerializeField] private LayoutDirection _direction = LayoutDirection.LeftToRight;
         // Left, right, top, bottom. One Vector4 so property bindings see four animatable channels (as Box.Inset).
-        [SerializeField] private Vector4 _padding;
+        [SerializeField, InsetsField] private Vector4 _padding;
         [SerializeField, Min(0f)] private float _gap;
         [SerializeField] private AlignX _alignX = AlignX.Left;
         [SerializeField] private AlignY _alignY = AlignY.Top;
+        [Tooltip("Where this node sits across its parent's flow, in place of the parent's alignment on that axis. Auto uses the parent's.")]
+        [SerializeField] private AlignSelf _alignSelf = AlignSelf.Auto;
         [SerializeField, Min(0f)] private float _aspectRatio;
         [SerializeField] private Vector2 _offset;
         [SerializeField] private AttachTo _attachTo = AttachTo.None;
@@ -34,12 +36,19 @@ namespace TimboJimbo.UI.Layout
         [SerializeField] private AttachPoint _elementPoint = AttachPoint.LeftTop;
         [SerializeField] private AttachPoint _parentPoint = AttachPoint.LeftTop;
         [SerializeField] private Vector2 _floatOffset;
-        [SerializeField] private LayoutTransition _transition;
+        // Unset (the flag off) means the view transition's own timing; set, even to Instant, it is this node's.
+        // The timing is zeroed whenever the flag is off, so timing with the flag off can only be data saved before
+        // the flag existed, when a timing was the override: OnAfterDeserialize sets the flag for it.
+        [SerializeField, HideInInspector] private bool _overrideTransition;
+        [Tooltip("How this node moves inside a view transition. Inherit uses the transition's own timing; Custom sets this node's, and a Custom with no duration and no delay snaps.")]
+        [SerializeField, NodeTransition] private LayoutTransition _transition;
+        // The override's motion, kept beside the struct (which is saved by value) and drawn with it; null is a straight line.
+        [SerializeReference, HideInInspector] private ITransitionMotion _motion;
         [Tooltip("Like the web's view-transition-name: a node that appears in a view transition with the name another node had before it takes that node's place, the two flying and cross-fading. Empty means the node matches only itself.")]
         [SerializeField] private string _viewTransitionName;
         [Tooltip("Namespaces the view transition names of every node below this one (and its own): set it to the item's id when a prefab instance is bound to data, so a list of the same prefab has no duplicate names and a page bound to the same item pairs with that instance's parts. Empty means the names are used as they are.")]
         [SerializeField] private string _viewTransitionScope;
-        [Tooltip("Keep this object across a view transition instead of cross-fading it with the node that carries its name in the new state: the two swap places, so this one flies into the new spot with its state (a running animation, a playing video) intact, and the new copy waits where this one was for the trip back. Flag both copies.")]
+        [Tooltip("Keep this object across a view transition instead of cross-fading it with the node that carries its name in the new state: the two swap places, so this one flies into the new spot with its state (a running animation, a playing video) intact, and the new copy waits where this one was for the trip back. Flagging one copy is enough: the flag travels with the kept object. Moved to a new parent inside a view transition, a flagged node is carried there above everything, the same object throughout.")]
         [SerializeField] private bool _viewTransitionPersist;
 
         // Engine scratch, valid from the owning root's Compute to its Commit. Engine space is the root's
@@ -84,6 +93,19 @@ namespace TimboJimbo.UI.Layout
         internal float _fadeRestore;
         internal bool _fadePassThrough;
 
+        // How a motion has the node look right now: a scale around its centre, an opacity, and its morph, which a
+        // half of a matched pair fades by and what rides inside it moves by. The scale is applied by every write
+        // (see LayoutEngine.Write); the opacity goes through the fade's CanvasGroup, or one taken when first needed
+        // and put back to _lookRestore when the move ends. _ridesOn is the travelling node above this one whose
+        // morph this node's own move follows, if any.
+        internal float _lookScale = 1f;
+        internal float _lookOpacity = 1f;
+        internal float _lookMorph = 1f;
+        internal LayoutNode _ridesOn;
+        internal bool _lookScaled;
+        internal CanvasGroup _lookGroup;
+        internal float _lookRestore;
+
         // A node a view transition has lifted into its canvas's transition layer, with the placeholder that keeps
         // its slot in the tree meanwhile; and the placeholders themselves, which are never captured or grouped.
         internal bool _lifted;
@@ -102,6 +124,28 @@ namespace TimboJimbo.UI.Layout
         internal bool _exitStarted;
         internal int _exitToken;
         internal System.Action _exitThen;
+
+        // A hidden node stays in the flow but is not drawn and takes no clicks (LayoutSystem.Hide). Once nothing is
+        // animating it, it is _concealed: its CanvasGroup rests at 0, the alpha it had and whether it blocked clicks
+        // kept for when it is shown again.
+        internal bool _hidden;
+        internal bool _concealed;
+        internal float _concealRestore;
+        internal bool _concealBlocked;
+
+        // Arrival: _shown once the node has had a layout in this enabled span (a reparent does not clear it, unlike
+        // _hasCommitted), _arriving on the pass that gives it its first while its parent was already shown, and
+        // _settled when it was enabled inside LayoutSystem.Settle, so its first layout is not an arrival.
+        internal bool _shown;
+        internal bool _arriving;
+        internal bool _settled;
+        // The parent the node had when a view transition captured the scene: a persisting node under a new one is carried.
+        internal Transform _capturedParent;
+
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+        // An AttachElement outside the tree is reported once, until it changes.
+        internal bool _warnedAttach;
+#endif
 
         private RectTransform _rectTransform;
 
@@ -190,7 +234,25 @@ namespace TimboJimbo.UI.Layout
             }
         }
 
-        /// <summary>Width over height. When above 0 and the height is Fit, the height is derived from the width.</summary>
+        /// <summary>
+        /// Where this node sits across its parent's flow (vertically in a left-to-right parent, horizontally in a
+        /// top-to-bottom one), in place of the parent's alignment on that axis. Auto uses the parent's.
+        /// </summary>
+        public AlignSelf AlignSelf
+        {
+            get => _alignSelf;
+            set
+            {
+                if (_alignSelf == value) return;
+                _alignSelf = value;
+                SetDirty();
+            }
+        }
+
+        /// <summary>
+        /// Width over height. When above 0 and the height is Fit, the height is derived from the width; when the
+        /// width is Fit and the height Fixed, the width is derived from the height.
+        /// </summary>
         public float AspectRatio
         {
             get => _aspectRatio;
@@ -216,7 +278,7 @@ namespace TimboJimbo.UI.Layout
                 if (_offset == value) return;
                 _offset = value;
                 if ((_hasCommitted && !IsRoot) || _lifted)
-                    RectTransform.anchoredPosition = _committedBase + _offset;
+                    RectTransform.anchoredPosition = _committedBase + _offset + LayoutEngine.LookShift(this, _visualRect.size);
             }
         }
 
@@ -240,6 +302,9 @@ namespace TimboJimbo.UI.Layout
             {
                 if (_attachElement == value) return;
                 _attachElement = value;
+#if UNITY_EDITOR || DEVELOPMENT_BUILD
+                _warnedAttach = false;
+#endif
                 SetDirty();
             }
         }
@@ -282,20 +347,28 @@ namespace TimboJimbo.UI.Layout
 
         /// <summary>
         /// The transition this node moves with inside a view transition, in place of the one the transition was
-        /// started with, the way a CSS rule on <c>::view-transition-group(name)</c> overrides the default. None
-        /// (the default) means the transition's own. Outside a view transition layout is instant, whatever this
-        /// is set to. Changing it never triggers a pass.
+        /// started with, the way a CSS rule on <c>::view-transition-group(name)</c> overrides the default. Null
+        /// (the default) means the transition's own; <see cref="LayoutTransition.Instant"/> makes the node snap
+        /// while everything around it animates. Outside a view transition layout is instant, whatever this is set
+        /// to. Changing it never triggers a pass.
         /// </summary>
-        public LayoutTransition Transition
+        public LayoutTransition? Transition
         {
-            get => _transition;
-            set => _transition = value;
+            get => _overrideTransition ? _transition.With(_motion) : null;
+            set
+            {
+                _overrideTransition = value.HasValue;
+                _transition = value ?? default;
+                _motion = value?.Motion;
+                _transition.Motion = null;
+            }
         }
 
         /// <summary>
         /// Like the web's <c>view-transition-name</c>. A node that appears in a view transition carrying the name
         /// another node had before the update takes that node's place: it flies in from where the old node was
-        /// while the old node, if it is still shown, flies out to the new spot, the two cross-fading. Set it when
+        /// while the old node, if it is leaving or hidden (<see cref="LayoutSystem.Hide"/>), flies out to the new
+        /// spot, the two cross-fading; an old node that stays in the page stays put, the new one growing out of it. Set it when
         /// binding data, for instance to the item's id, so the card in a list and the header of its detail page
         /// share it. Empty (the default) matches the node with itself only. The same name on two nodes at once
         /// skips the transition. Changing it never triggers a pass.
@@ -323,7 +396,10 @@ namespace TimboJimbo.UI.Layout
         /// Like Astro's <c>transition:persist</c>. When this node is captured and the new state has a node with
         /// its name, the two are not cross-faded: they swap places in the hierarchy, so this object flies into
         /// the new spot with its state intact (a running animation, a playing video) and the new copy waits
-        /// where this one was, ready for the trip back. Flag both copies so the swap works in both directions.
+        /// where this one was, ready for the trip back. Flagging one copy is enough, since the flag travels with
+        /// the kept object; note that references to "the copy" then point at the other object until the trip
+        /// back. To hand one live object to another screen instead, move it: a flagged node the update moves to
+        /// a new parent is carried there, lifted above everything like a pair, with no copy and no swap.
         /// </summary>
         public bool ViewTransitionPersist
         {
@@ -346,6 +422,21 @@ namespace TimboJimbo.UI.Layout
 
         /// <summary>True from <see cref="LayoutSystem.Exit"/> until the node has left: it is out of the flow and on its way out.</summary>
         public bool IsExiting => _exiting;
+
+        /// <summary>
+        /// Whether the node is shown and staying: active, not on its way out and not hidden. Setting it true is
+        /// <see cref="LayoutSystem.Show"/> (which also calls back a node that is leaving, or shows a hidden one);
+        /// false is <see cref="LayoutSystem.Exit"/>. Inside a view transition both animate.
+        /// </summary>
+        public bool Shown
+        {
+            get => gameObject.activeSelf && !_exiting && !_hidden;
+            set
+            {
+                if (value) LayoutSystem.Show(this);
+                else LayoutSystem.Exit(this);
+            }
+        }
 
         /// <summary>This node's RectTransform.</summary>
         public RectTransform RectTransform => _rectTransform != null ? _rectTransform : (_rectTransform = (RectTransform)transform);
@@ -387,14 +478,23 @@ namespace TimboJimbo.UI.Layout
         /// <summary>Marks the tree for layout before the next render.</summary>
         public void MarkDirty() => LayoutSystem.MarkDirty(this);
 
-        /// <summary>Where the node should be shown right now: the eased point between the transition's ends, or the visual rect when nothing is in flight.</summary>
+        /// <summary>Where the node should be shown right now: the move's current frame, or the visual rect when nothing is in flight.</summary>
         internal Rect CurrentVisual()
         {
             if (!_animating) return _visualRect;
-            float eased = EasedProgress();
-            return new Rect(
-                Vector2.LerpUnclamped(_animFrom.position, _animTo.position, eased),
-                Vector2.LerpUnclamped(_animFrom.size, _animTo.size, eased));
+            var frame = CurrentFrame();
+            return new Rect(frame.Centre - frame.Size * 0.5f, frame.Size);
+        }
+
+        /// <summary>The in-flight move's frame from its transition's motion (engine space is y down, so a rect's own centre is its middle).</summary>
+        internal MotionFrame CurrentFrame()
+        {
+            // Inside a parent that travels too, the node goes from its old place in the parent to its new one as the
+            // parent's contents morph, not on its own clock; once the parent has arrived, its contents are morphed.
+            float eased = _ridesOn == null ? EasedProgress()
+                : _ridesOn._animating || _ridesOn._lifted ? _ridesOn._lookMorph
+                : 1f;
+            return _animTransition.Evaluate(new MotionInput(_animFrom.center, _animTo.center, _animFrom.size, _animTo.size, Progress(), eased));
         }
 
         /// <summary>The in-flight move's eased progress, 0 to 1: 0 through its delay, then eased over its duration.</summary>
@@ -437,6 +537,17 @@ namespace TimboJimbo.UI.Layout
             };
         }
 
+        /// <summary>True when the children are spread along <paramref name="axis"/> (SpaceBetween), which only means anything along the flow.</summary>
+        internal bool SpreadsAlong(int axis) => axis == 0 ? _alignX == AlignX.SpaceBetween : _alignY == AlignY.SpaceBetween;
+
+        /// <summary>Where <see cref="AlignSelf"/> puts the node across its parent's flow: 0 at the start, 0.5 centred, 1 at the end.</summary>
+        internal float AlignSelfFraction() => _alignSelf switch
+        {
+            AlignSelf.Center => 0.5f,
+            AlignSelf.End => 1f,
+            _ => 0f,
+        };
+
         // ── Lifecycle ──────────────────────────────────────────────────────────
 
         protected override void OnEnable()
@@ -456,10 +567,14 @@ namespace TimboJimbo.UI.Layout
             _tracker.Clear();
             _animating = false;
             _hasCommitted = false;
+            _shown = false;
+            _arriving = false;
+            _settled = false;
             _exiting = false;
             _exitStarted = false;
             _exitThen = null;
             LayoutEngine.EndFade(this);
+            LayoutEngine.ResetLook(this);
             LayoutSystem.LiftedNodeDisabled(this);
             // The tree this node leaves re-lays out without it; a disabled node cannot carry the mark itself.
             LayoutSystem.MarkDirty(ParentNode);
@@ -487,6 +602,7 @@ namespace TimboJimbo.UI.Layout
         {
             base.OnTransformParentChanged();
             _hasCommitted = false;
+            LayoutSystem.StampSettled(this);
             SetDirty();
         }
 
@@ -501,6 +617,14 @@ namespace TimboJimbo.UI.Layout
         {
             base.OnDidApplyAnimationProperties();
             SetDirty();
+        }
+
+        void ISerializationCallbackReceiver.OnBeforeSerialize() { }
+
+        void ISerializationCallbackReceiver.OnAfterDeserialize()
+        {
+            if (!_overrideTransition && _transition.IsAnimated)
+                _overrideTransition = true;
         }
 
 #if UNITY_EDITOR

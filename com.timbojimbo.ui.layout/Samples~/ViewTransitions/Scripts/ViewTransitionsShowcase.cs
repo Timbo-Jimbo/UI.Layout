@@ -94,7 +94,7 @@ namespace TimboJimbo.UI.Layout.Samples.ViewTransitions
             LayoutSystem.StartViewTransition(() =>
             {
                 foreach (var item in _delay.Items)
-                    item.gameObject.SetActive(true);
+                    LayoutSystem.Show(item);
             });
         }
 
@@ -117,14 +117,14 @@ namespace TimboJimbo.UI.Layout.Samples.ViewTransitions
         // 8. A scope makes prefab-style names unique per instance: the detail takes the scope of the item it opens.
         public void OpenScoped(int index)
         {
-            if (!_scope.A.gameObject.activeSelf) return;
+            if (!_scope.A.Shown) return;
             _scope.B.ViewTransitionScope = index.ToString();
             Toggle(_scope);
         }
 
         public void BackScoped()
         {
-            if (_scope.A.gameObject.activeSelf) return;
+            if (_scope.A.Shown) return;
             Toggle(_scope);
         }
 
@@ -156,7 +156,7 @@ namespace TimboJimbo.UI.Layout.Samples.ViewTransitions
             LayoutSystem.StartViewTransition(() =>
             {
                 LayoutSystem.Exit(page.Node, () => Destroy(page.gameObject));
-                _page.A.gameObject.SetActive(true);
+                LayoutSystem.Show(_page.A);   // calls the cards back if they are still leaving from a quick open
             }, Slow);
         }
 
@@ -165,7 +165,7 @@ namespace TimboJimbo.UI.Layout.Samples.ViewTransitions
         public void InsertPlain() => Insert(_compare.A, false);
         public void InsertWrapped() => Insert(_compare.B, true);
 
-        // 12. Starting a transition completes the one in flight: click repeatedly and the blocks retarget from where they are.
+        // 12. Starting a transition takes over the one in flight: click repeatedly and the blocks go on from where they are.
         public void Interrupt() => MoveLastToFront(_interrupt, LayoutTransition.Over(1.5f));
 
         private void Insert(LayoutNode column, bool wrapped)
@@ -179,14 +179,11 @@ namespace TimboJimbo.UI.Layout.Samples.ViewTransitions
                 item.gameObject.SetActive(true);
                 Wire(item, wrapped);
             }
+            // Unwrapped, the block still plays its animator's enter as it arrives; only the transition moves the rest.
             if (wrapped)
                 LayoutSystem.StartViewTransition(Add);
             else
-            {
                 Add();
-                if (item.TryGetComponent<IViewTransitionAnimator>(out var animator))
-                    animator.Enter(null, () => { });
-            }
         }
 
         private static void RemoveBlock(LayoutNode item, bool wrapped)
@@ -240,12 +237,14 @@ namespace TimboJimbo.UI.Layout.Samples.ViewTransitions
 
         private static void Toggle(Demo demo)
         {
-            var shown = demo.A.gameObject.activeSelf ? demo.A : demo.B;
+            // Shown, not activeSelf: a side still leaving from the last click is active but no longer shown, and
+            // Show calls it back where SetActive(true) would do nothing and let its exit deactivate it.
+            var shown = demo.A.Shown ? demo.A : demo.B;
             var other = ReferenceEquals(shown, demo.A) ? demo.B : demo.A;
             LayoutSystem.StartViewTransition(() =>
             {
                 LayoutSystem.Exit(shown);
-                other.gameObject.SetActive(true);
+                LayoutSystem.Show(other);
             }, Slow);
         }
     }

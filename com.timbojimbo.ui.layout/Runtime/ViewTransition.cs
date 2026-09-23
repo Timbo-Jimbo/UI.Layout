@@ -14,7 +14,8 @@ namespace TimboJimbo.UI.Layout
     /// flown along straight lines to where layout puts them now. Nodes that appeared enter and nodes handed to
     /// <see cref="LayoutSystem.Exit"/> leave in place, beneath the layer; every other node that changed rect moves
     /// there in place. <see cref="Finished"/> fires when the last flight has landed; <see cref="SkipTransition"/>
-    /// ends it at once. Only one runs at a time: starting another skips this one.
+    /// ends it at once. A transition started over the same nodes (an overlapping scope) takes over: this one
+    /// finishes and its moves go on from where they are under the new one.
     /// </summary>
     public sealed class ViewTransition
     {
@@ -23,7 +24,7 @@ namespace TimboJimbo.UI.Layout
 
         internal enum GroupKind
         {
-            /// <summary>A name that moved from one node to another: the new node flies in from the old one's spot and the old one, if it is leaving, flies out to it, the two cross-fading.</summary>
+            /// <summary>A name that moved from one node to another: the new node flies in from the old one's spot and the old one, if it is leaving or hidden, flies out to it, the two cross-fading.</summary>
             Pair,
             /// <summary>A persisting pair: the old object is kept and flies into the new spot; the copy marks the spot, hidden, and the two swap places at the end.</summary>
             Persist,
@@ -31,6 +32,8 @@ namespace TimboJimbo.UI.Layout
             Exit,
             /// <summary>The topmost node of a subtree that appeared: it plays its animator's enter or fades in at its final rect.</summary>
             Enter,
+            /// <summary>A persisting node the update moved to a new parent: lifted, it flies from its old slot to its new one, the same object throughout.</summary>
+            Carry,
         }
 
         /// <summary>One entry of the groups table. <see cref="Old"/> is the node in the state before the update (null for an entering group), <see cref="New"/> the node after it.</summary>
@@ -39,7 +42,10 @@ namespace TimboJimbo.UI.Layout
             public GroupKind Kind;
             public LayoutNode Old;
             public LayoutNode New;
-            /// <summary>Whether the old half flies along: only when it is on its way out, as on the web an element that stays in the page is not the old image.</summary>
+            /// <summary>
+            /// Whether the old half flies along: when it is leaving, or hidden in its place, which it goes back to
+            /// unseen when the flight lands. One that stays in the page stays put and the new one grows out of it.
+            /// </summary>
             public bool OldFlies;
         }
 
@@ -57,6 +63,8 @@ namespace TimboJimbo.UI.Layout
             public Transform Marker;
             public Rect From;
             public Rect LastDestination;
+            /// <summary>The rect last written, in world space, before any scale the flight's look adds: what parts riding it measure from.</summary>
+            public Rect LastRect;
             public SizeRule Size;
             /// <summary>Lay the node's subtree out against its animated rect each tick: a kept object is arriving and has no final layout yet, so its content follows its rect; a pair's halves keep the layout they had, like snapshots.</summary>
             public bool LayoutEachTick;
@@ -75,7 +83,8 @@ namespace TimboJimbo.UI.Layout
         }
 
         internal readonly int Id;
-        internal readonly LayoutTransition Default;
+        /// <summary>The subtree this transition captures and animates, or null for the whole UI.</summary>
+        internal readonly Transform Scope;
         /// <summary>The node that carried each name when the scene was captured.</summary>
         internal readonly Dictionary<string, LayoutNode> Old = new();
         internal readonly List<Group> Groups = new();
@@ -86,12 +95,40 @@ namespace TimboJimbo.UI.Layout
         internal readonly List<Effect> Effects = new();
         /// <summary>Persisting pairs (kept, copy) that exchange places when the transition ends.</summary>
         internal readonly List<(LayoutNode Kept, LayoutNode Copy)> Swaps = new();
+#if UNITY_EDITOR
+        /// <summary>Nodes outside the scope where they were captured, to name one the update moved; and the captured nodes that were shown, to name one it deactivated.</summary>
+        internal readonly List<(LayoutNode Node, Rect World)> Outside = new();
+        internal readonly List<LayoutNode> WasShown = new();
+#endif
+        private readonly string[] _types;
 
-        internal ViewTransition(int id, LayoutTransition transition)
+        internal ViewTransition(int id, Transform scope, LayoutTransition transition, string[] types)
         {
             Id = id;
-            Default = transition;
+            Scope = scope;
+            Transition = transition;
+            _types = types != null && types.Length > 0 ? (string[])types.Clone() : Array.Empty<string>();
         }
+
+        /// <summary>The timing the transition was started with: what nodes move with unless they set their own.</summary>
+        public LayoutTransition Transition { get; }
+
+        /// <summary>What kind of change this is, as the caller said when starting it ("forward", "back"), like the web's view transition types. Empty when none were given.</summary>
+        public IReadOnlyList<string> Types => _types;
+
+        /// <summary>True when the caller gave this transition the type <paramref name="type"/> (compared exactly).</summary>
+        public bool HasType(string type)
+        {
+            for (int i = 0; i < _types.Length; i++)
+            {
+                if (string.Equals(_types[i], type, StringComparison.Ordinal))
+                    return true;
+            }
+            return false;
+        }
+
+        /// <summary>The timing <paramref name="node"/> moves with in this transition: its own <see cref="LayoutNode.Transition"/> if it sets one, otherwise <see cref="Transition"/>. An animator that follows it stays in step with the moves.</summary>
+        public LayoutTransition TransitionFor(LayoutNode node) => node != null && node.Transition is { } own ? own : Transition;
 
         /// <summary>True once every node the transition set moving has settled, or it was skipped.</summary>
         public bool IsFinished { get; private set; }
@@ -109,8 +146,6 @@ namespace TimboJimbo.UI.Layout
 
         /// <summary>Ends the transition now: every node it moves jumps to its end state and exits conclude.</summary>
         public void SkipTransition() => LayoutSystem.SkipViewTransition(this);
-
-        internal LayoutTransition TransitionFor(LayoutNode node) => node != null && node.Transition.IsAnimated ? node.Transition : Default;
 
         internal Effect AddEffect(LayoutNode node, IViewTransitionAnimator animator, bool isExit)
         {

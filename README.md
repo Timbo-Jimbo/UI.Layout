@@ -1,26 +1,20 @@
 # Timbo Jimbo - UI Layout
 
-A layout engine for UGUI, modelled on [Clay](https://github.com/nicbarker/clay).
+**Flexbox-style layout for Unity UI, with animation that just happens.**
 
-📐 **One Component**
+Add a Layout Node, say how things should size (fit their content, fill the space, or a fixed size) and your UI lays itself out. No rebuild calls, no anchors to fight. When something changes, wrap the change in one line and everything glides to its new place.
 
-Add a `LayoutNode` to each `RectTransform` you want laid out. The node whose parent has no node is the root; the engine owns everything below it.
+📐 **One component**
 
-🧮 **Pure Pass**
+Put a `LayoutNode` on your panels and it arranges its children: in a row or a column, with padding, gaps and alignment.
 
-Layout is computed from the nodes' settings and the leaves' measurements, and the `RectTransform`s are written once at the end. Nothing is read back from the transforms, so offsets and animation can sit on top without fighting the layout.
+🔌 **Works with what you have**
 
-📏 **Clay's Model**
+Images, TextMeshPro texts and LayoutElements size themselves with no adapter, and a layout can live inside a ScrollRect or a UGUI layout group.
 
-Fit, Grow, Fixed and Percent sizing per axis with min and max, padding, gap, direction, child alignment, floating elements and aspect ratios. No margins, no child wrapping.
+✨ **Animation for free**
 
-🔌 **UGUI Friendly**
-
-A node measures stock UGUI components (LayoutElement, Image, TextMeshPro) as its content with no adapter, and `LayoutRootBridge` lets a tree sit inside a UGUI layout group or a ScrollRect.
-
-🧩 **Styling Friendly**
-
-Every setting is a plain serialized field with a dirtying setter, so it works with animation, the Property Bindings package and the Styling package out of the box.
+Items slide into place, fade in and out, and even fly from a card into a full page, with one call around the change you were making anyway.
 
 # Installation
 
@@ -42,121 +36,99 @@ Done!
 > [!WARNING]
 > This package is new - use at your own risk! :)
 
-# Usage
+# Your first layout
 
-## Nodes
+**In the inspector:**
 
-Add **Timbo Jimbo > UI > Layout > Layout Node** to a `RectTransform`. A node lays out its child nodes; children without a node are left alone and follow their parent through their anchors.
+1. Under your Canvas, add **Timbo Jimbo > UI > Layout > Layout Node** to a panel. Set **Direction** to *Top To Bottom* and **Gap** to 8.
+2. Give the panel a few children with an **Image** and a Layout Node each. Set their **Width** to *Grow* and their **Height** to *Fixed* 40.
+3. Add a TextMeshPro text as another child, with a Layout Node. It sizes itself to its text.
 
-- **Width / Height** are a mode and its values:
-  - **Fit** sizes to the children (or the content of a leaf), between **Min** and **Max**.
-  - **Grow** fills the space the parent has left, shared with other Grow children, between **Min** and **Max**. On the axis across the flow it fills the parent's inner size.
-  - **Fixed** is an exact size.
-  - **Percent** is a fraction of the parent's inner size (padding and gaps excluded).
-- **Direction** lays children out left to right or top to bottom.
-- **Padding** insets the children (left, right, top, bottom); **Gap** is the space between them.
-- **Align X / Align Y** place the children within the free space, along the flow and across it.
-- **Aspect Ratio** (width over height) derives a Fit height from the width, for images.
-- **Attach To** takes the node out of the flow and floats it: pick the attach point on the element and on the target (the parent, the root or another node) and an offset. Floating nodes never affect their parent's Fit size.
-- **Offset** translates the node after layout. Changing it on a settled tree moves just that node, so it is the field to animate.
+That's it. The panel stacks its children, and whenever something changes (a new child, a longer text, a different gap) it lays out again before the next frame. There is nothing to rebuild.
 
-The root's size is its `RectTransform` rect unless its sizing is Fit or Fixed, in which case the root sizes itself.
-
-When children overflow the space, Grow children shrink first down to their Min, then Fit children down to their minimum (a leaf's content minimum, such as the longest word). Fixed and Percent children never shrink.
-
-## Transitions
-
-Layout is instant. Animation comes from **view transitions**, after the web API: `LayoutSystem.StartViewTransition(update)` is `document.startViewTransition` for these trees. It captures where every node is shown, runs `update`, lays the new state out at once, and then animates the difference as one transition. There are no snapshots: the objects themselves move, so anything animating on them keeps animating through the transition, and nothing is left on an object afterwards but the CanvasGroup a fade added.
-
-**What moves.** The difference is sorted the way the web sorts its captured elements:
-
-- **Movers.** A node that ended up somewhere else travels there from where it was shown, in place, whatever parent or tree it moved to. A node that only rode its parent has nothing of its own to do.
-- **Pairs.** A node that appears with a **View Transition Name** another node carried before the update takes that node's place, flying in from its spot; the old node, if it is leaving, flies out with it, the two cross-fading.
-- **Persisting pairs** (`ViewTransitionPersist`, after Astro's `transition:persist`). The old object is kept instead of cross-faded: it flies into the new spot with its state intact (a running animation, a playing video), its content laid out against its rect as it grows, and when the transition ends the two objects swap places, the copy taking the old slot or going with the old tree if that tree is gone. Flag both copies. A persisting object keeps its own sizing, so size it by its slot: a Grow block inside a slot node that each side sizes.
-- **Exits.** Nodes handed to `LayoutSystem.Exit` inside the update leave; the tree reflows without them at once.
-- **Enters.** The topmost node of each subtree that appeared enters; the nodes inside it ride with it.
-
-A name found in only one state rides whatever its tree does.
-
-**The transition layer.** Pairs and persisting pairs are lifted out of their trees for the length of the transition into a plain rect kept as the last child of their canvas, and stacked there in capture order (groups that existed before the update in the old state's paint order, new ones after), exactly as the web's groups are in its top layer. What draws over what no longer depends on where the nodes sit in their trees, and a part flies the same straight line however deep it is nested and whatever its container is doing. A placeholder of the same size keeps each lifted node's slot, so the tree lays out exactly as before, and the slot, read live, is where the flight lands: scrolling or a reflow during the transition is honoured. A lifted container keeps the layout its content was given for its final size, clipped by its own mask, the way a snapshot would. Enters and exits play in place beneath the layer, keeping their scroll-view clipping; a leaving node lets clicks through.
-
-**Grounding a cross-fade.** Two alpha fades let some of what is behind show through at the crossover (the web hides this by blending its snapshots with `plus-lighter`). Build a card or page as an unnamed container holding a persisting background node and then a named body with the content: the surface itself grows from the card into the page, opaque, while the bodies cross-fade over it. The background goes *before* the body because groups stack in capture order; a named child of the body would draw above the body's content, which is the web's rule for named descendants too.
-
-**Names and scopes.** Names are authored in prefabs ("avatar", "title") and made unique per instance with a **View Transition Scope**: set it to the item's id on the instance's root when it is bound, and every name below resolves to `scope/name`. A list of one prefab then has no duplicate names, and a page given the same scope pairs with that instance's parts, on the way there and back, without touching a part name. The same name on two nodes in one state skips the transition with a warning, as on the web.
-
-**Entering and leaving.** What a node looks like while it enters or leaves is not layout's business, just as the web leaves it to keyframes on `::view-transition-new` and `::view-transition-old`. Put an `IViewTransitionAnimator` on the node's object and the engine hands it the moments: `Enter` on the node's first layout inside a transition, `Exit` when `LayoutSystem.Exit` takes it out (the tree has already reflowed without it and it is still drawn where it was), each with a `done` to call when the effect ends, which `Finished` waits for and which lets the leaving node go (it is deactivated, then `Exit`'s callback runs); and `Skip` when the transition is skipped. With the Sequencer installed, **View Transition Sequences** implements it with two authored sequences, Enter and Exit, on a `SequenceProvider`: tween the node's `Offset`, a CanvasGroup's alpha, a scale, anything. Without an animator, an entering or leaving subtree fades through a CanvasGroup, added the first time the object needs one and left in place; fades follow the move's own ease, so the crossover of a pair rides the motion whichever way a transition runs. Outside a view transition `Exit` still plays the animator's exit, and a node without one leaves at once.
-
-**Timing.** Nodes move with the `LayoutTransition` you pass, a delay, a duration and an ease like CSS `animation-delay`, `animation-duration` and `animation-timing-function` (the default is a quarter second easing out), unless they set a **Transition** of their own, the way a CSS rule on `::view-transition-group(name)` overrides the default. A delayed default makes every move wait, which is how a list closes up only after the leaving item has played out. The call returns a `ViewTransition` with `Finished` and `SkipTransition()`. Only one runs at a time: starting another completes the one in flight (its flights and moves land at once; its enter and exit effects play on, since they belong to their nodes and touch no layout), while `SkipTransition()` ends everything at once. Content that cannot be drawn between two sizes (text) takes its new size at once and animates only its position; an `Img` scales. A layout pass during a transition leaves the moves alone, and a changed target retargets a moving node with the move's own timing. `LayoutRect` is always the target; `VisualRect` and `IsTransitioning` tell you where a node is on the way. A root's own rect never animates: it is the tree's contract with whatever holds it (a ScrollRect, a UGUI parent), which reads the transform at once, so a scroll position set right after `StartViewTransition` is against the final content size. Moves follow the unscaled clock, so menus keep moving while the game is paused; set `LayoutSystem.UseScaledTime` to have them follow `Time.timeScale` instead.
-
-**Spawned pages.** The two states only have to exist for the length of the transition, as on the web: instantiate and bind the page inside the update and `Exit` the old tree with a destroy callback. The old object is deactivated the moment its exit ends, then destroyed; a persisting object lands in the new tree whatever became of the old one.
-
-**When to wrap.** Use a view transition whenever a state change should be *seen* as a change in what is there or where it is: things appearing, leaving, moving, one screen becoming another. Use a plain sequence for effects that are not layout changes: a press pulse, a highlight, a shake. An authored enter or exit plays either way; the wrapper is what makes everything else that moved glide, and it costs one capture of the enabled nodes.
+**In code:**
 
 ```csharp
-// A card in a list opens into a page spawned for it. The card's parts and the page's share prefab-style names.
-LayoutSystem.StartViewTransition(() =>
-{
-    var page = Instantiate(pagePrefab, parent);
-    page.Bind(item);                                             // sets the page's scope to the item's id
-    LayoutSystem.Exit(list);                                     // the list leaves; the card's parts fly to the page's
-});
-
-// Back: the page leaves and is destroyed once it has gone; the list returns and the parts fly home.
-LayoutSystem.StartViewTransition(() =>
-{
-    LayoutSystem.Exit(page.Node, () => Destroy(page.gameObject));
-    list.SetActive(true);
-});
-
-// A list item leaves first, then the list closes up.
-LayoutSystem.StartViewTransition(() => LayoutSystem.Exit(item, () => Destroy(item.gameObject)),
-    LayoutTransition.Over(0.25f).After(0.2f));
-```
-
-## Leaves
-
-A node with no child nodes is a leaf, and the component next to it is its content. The main path is a component implementing `ILayoutMeasurable`: `Measure(availableWidth)` returns the content size for a width (negative means unconstrained) and `MinWidth` is how narrow it can go. `TextBlock` (UI Text) and `Img` (UI) implement it when this package is installed, so a text is just a node plus a TextBlock. Stock UGUI components (LayoutElement, Image, TextMeshPro) need nothing extra either: with no measurable on the object the node reads their `ILayoutElement` values the way a UGUI group would and relays their dirty callbacks, so a sprite or string change reflows the tree. That compatibility path has two limits, kept in `LayoutNode.Compatibility.cs`: `ILayoutElement` only answers for the width on its transform, so the node sets that width before reading, and the elements' minimum width is 0 for a text, so a squeezed TextMeshPro can wrap narrower than its longest word.
-
-## Driving nodes from code, sequences and styles
-
-Every setting has a setter that marks the tree, and `Offset` moves the node in place without a pass. With the Property Bindings package installed, `LayoutNodeProperties` provides descriptors for Offset, FloatOffset, Padding, Gap, AspectRatio, the Width and Height values, Direction and the alignments, so the Sequencer and Styling drive a node through those same setters:
-
-```csharp
-var offset = LayoutNodeProperties.Offset.Create(row);   // a BindableProperty for a tween or a style
-```
-
-## Sample
-
-The **Layout** sample (Package Manager > UI Layout > Samples) is a showcase scene with every feature in one place: the sizing modes side by side, alignment on both axes, a narrow row where text shrinks and wraps, a floating badge and tooltip, aspect-ratio tiles and a scrolling list. Its buttons add and remove rows, flip the sizing row between the two directions, change its gap and pulse a block's Offset, so you can see what reflows and what does not.
-
-## Inside UGUI layout
-
-Add **Layout Root Bridge** to a root that lives inside a UGUI layout group or a ScrollRect content. It reports the root's Fit size to UGUI and re-lays the tree out when UGUI resizes the root. A UGUI layout group inside a node still lays out its own children after the node sizes it.
-
-## Scripting API
-
-```csharp
-var list = gameObject.AddComponent<LayoutNode>();
+var list = panel.AddComponent<LayoutNode>();
 list.Direction = LayoutDirection.TopToBottom;
-list.Width = Sizing.Grow();                 // fill the rect
-list.Height = Sizing.Fit();                 // size to the rows
-list.Gap = 6f;
-list.Padding = new Vector4(8f, 8f, 8f, 8f); // left, right, top, bottom
+list.Gap = 8f;
+list.Padding = Insets.All(12f);
 
 var row = rowObject.AddComponent<LayoutNode>();
-row.Width = Sizing.Grow();
-row.Height = Sizing.Fixed(56f);
-
-var badge = badgeObject.AddComponent<LayoutNode>();
-badge.AttachTo = AttachTo.Parent;
-badge.ElementPoint = AttachPoint.CenterCenter;
-badge.ParentPoint = AttachPoint.RightTop;
-
-row.Offset = new Vector2(0f, -4f);           // nudge after layout, no pass
-
-LayoutSystem.ForceLayout(list);              // settle now instead of before the next render
-Debug.Log(row.LayoutRect);                   // engine space: from the parent's top-left, y down
+row.Width = Sizing.Grow();          // fill the list's width
+row.Height = Sizing.Fixed(40f);
 ```
+
+**Sizing, per axis:**
+
+| Mode | What it does |
+|---|---|
+| **Fit** | Hugs its content: the children, or the text or image on it. |
+| **Grow** | Fills the space its parent has left, shared with other Grow siblings. |
+| **Fixed** | Exactly this size. |
+| **Percent** | A fraction of the parent's inner size. |
+
+Fit and Grow take an optional Min and Max. More in [Layout](com.timbojimbo.ui.layout/Documentation~/Layout.md).
+
+# Your first transition
+
+Layout changes are instant. To animate one, make the change inside `LayoutSystem.StartViewTransition`: everything that moved glides from where it was to where it is now. (The idea comes from the web's View Transitions API, if you know it.)
+
+**Animate any change.** Reorder, resize, realign or show something, and it all glides:
+
+```csharp
+LayoutSystem.StartViewTransition(() => toggle.AlignX = isOn ? AlignX.Right : AlignX.Left);
+```
+
+**Add an item.** It fades in and its neighbours make room:
+
+```csharp
+LayoutSystem.StartViewTransition(() => Instantiate(rowPrefab, list.transform));
+```
+
+**Remove an item.** `Exit` fades it out while the list closes up, then you can destroy it:
+
+```csharp
+LayoutSystem.StartViewTransition(() => LayoutSystem.Exit(row, () => Destroy(row.gameObject)));
+```
+
+Want the gap to close only after it has gone? Add a delay: `LayoutTransition.Over(0.25f).After(0.2f)`.
+
+**Move something to a new parent.** It's the same object, so it flies across:
+
+```csharp
+LayoutSystem.StartViewTransition(() => highlight.transform.SetParent(selectedTab.transform, false));
+```
+
+**Open a card into a page.** Give the card's picture and the page's picture the same **View Transition Name** in the inspector, then swap one screen for the other:
+
+```csharp
+LayoutSystem.StartViewTransition(() =>
+{
+    LayoutSystem.Exit(list);
+    page.gameObject.SetActive(true);
+});
+```
+
+The picture flies from the card to the page, and back again when you swap them back. Lots of cards? See [names in lists](com.timbojimbo.ui.layout/Documentation~/ViewTransitions.md#names-in-lists).
+
+Custom slide-ins, your own timing, keeping a playing video alive across the jump: it's all in [View Transitions](com.timbojimbo.ui.layout/Documentation~/ViewTransitions.md).
+
+# Try the samples
+
+Import them from **Package Manager > UI Layout > Samples**.
+
+- **Hello Layout**: start here. The recipes above in one small scene.
+- **Layout**: every sizing and alignment feature side by side, with buttons that change things.
+- **View Transitions**: one stage per feature. Good first stages: *1. Layout change*, *2. Enter and exit* and *11. Why wrap*, then *4. Delay*, *6. Reparent*, *7. Named pair* and *10. Together: a card opens into a page*.
+
+# Learn more
+
+- [Layout](com.timbojimbo.ui.layout/Documentation~/Layout.md): sizing, alignment, what happens when things don't fit, floating elements, aspect ratios and `Offset`.
+- [View Transitions](com.timbojimbo.ui.layout/Documentation~/ViewTransitions.md): showing and hiding, timing, names, custom enter and exit effects, and running several at once.
+- [View Transitions in depth](com.timbojimbo.ui.layout/Documentation~/ViewTransitions-Advanced.md): how a transition runs, the overlay things fly in, draw order, keeping objects alive, and the fine print.
+- [Content and UGUI](com.timbojimbo.ui.layout/Documentation~/Content-and-UGUI.md): how texts and images are measured, your own content, and layouts inside ScrollRects and UGUI layout groups.
+- [Scripting and styling](com.timbojimbo.ui.layout/Documentation~/Scripting-and-Styling.md): driving nodes from code, sequences and styles.
 
 # AI Usage Disclosure
 
