@@ -127,8 +127,18 @@ namespace TimboJimbo.UI.Layout
             return false;
         }
 
-        /// <summary>The timing <paramref name="node"/> moves with in this transition: its own <see cref="LayoutNode.Transition"/> if it sets one, otherwise <see cref="Transition"/>. An animator that follows it stays in step with the moves.</summary>
-        public LayoutTransition TransitionFor(LayoutNode node) => node != null && node.Transition is { } own ? own : Transition;
+        /// <summary>
+        /// How <paramref name="node"/> moves in this transition, each part inheriting on its own: the timing of its
+        /// <see cref="LayoutNode.Transition"/> if it sets one, otherwise <see cref="Transition"/>'s, with its
+        /// <see cref="LayoutNode.Motion"/> if it sets one, otherwise <see cref="Transition"/>'s motion; then
+        /// <see cref="LayoutSystem.AdjustTransition"/>, if one is set. An animator that follows it stays in step
+        /// with the moves.
+        /// </summary>
+        public LayoutTransition TransitionFor(LayoutNode node)
+        {
+            var resolved = node == null ? Transition : (node.Transition ?? Transition).With(node.Motion ?? Transition.Motion);
+            return LayoutSystem.AdjustTransition is { } adjust ? adjust(node, resolved) : resolved;
+        }
 
         /// <summary>True once every node the transition set moving has settled, or it was skipped.</summary>
         public bool IsFinished { get; private set; }

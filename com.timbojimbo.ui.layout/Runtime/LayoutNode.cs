@@ -40,9 +40,9 @@ namespace TimboJimbo.UI.Layout
         // The timing is zeroed whenever the flag is off, so timing with the flag off can only be data saved before
         // the flag existed, when a timing was the override: OnAfterDeserialize sets the flag for it.
         [SerializeField, HideInInspector] private bool _overrideTransition;
-        [Tooltip("How this node moves inside a view transition. Inherit uses the transition's own timing; Custom sets this node's, and a Custom with no duration and no delay snaps.")]
+        [Tooltip("How this node moves inside a view transition. Timing: Inherit uses the transition's own; Custom sets this node's, and a Custom with no duration and no delay snaps. Motion: Inherit uses the transition's own; anything else replaces it, whatever the timing.")]
         [SerializeField, NodeTransition] private LayoutTransition _transition;
-        // The override's motion, kept beside the struct (which is saved by value) and drawn with it; null is a straight line.
+        // The node's own motion, kept beside the struct (which is saved by value) and drawn with it; null inherits.
         [SerializeReference, HideInInspector] private ITransitionMotion _motion;
         [Tooltip("Like the web's view-transition-name: a node that appears in a view transition with the name another node had before it takes that node's place, the two flying and cross-fading. Empty means the node matches only itself.")]
         [SerializeField] private string _viewTransitionName;
@@ -346,22 +346,37 @@ namespace TimboJimbo.UI.Layout
         }
 
         /// <summary>
-        /// The transition this node moves with inside a view transition, in place of the one the transition was
-        /// started with, the way a CSS rule on <c>::view-transition-group(name)</c> overrides the default. Null
-        /// (the default) means the transition's own; <see cref="LayoutTransition.Instant"/> makes the node snap
-        /// while everything around it animates. Outside a view transition layout is instant, whatever this is set
-        /// to. Changing it never triggers a pass.
+        /// The timing this node moves with inside a view transition (duration, ease and delay), in place of the one
+        /// the transition was started with, the way a CSS rule on <c>::view-transition-group(name)</c> overrides the
+        /// default. Null (the default) means the transition's own; <see cref="LayoutTransition.Instant"/> makes the
+        /// node snap while everything around it animates. How the node travels is <see cref="Motion"/>, which
+        /// inherits on its own: this never carries a motion, and assigning a transition that does sets
+        /// <see cref="Motion"/> too. Outside a view transition layout is instant, whatever this is set to. Changing
+        /// it never triggers a pass.
         /// </summary>
         public LayoutTransition? Transition
         {
-            get => _overrideTransition ? _transition.With(_motion) : null;
+            get => _overrideTransition ? _transition : null;
             set
             {
                 _overrideTransition = value.HasValue;
                 _transition = value ?? default;
-                _motion = value?.Motion;
                 _transition.Motion = null;
+                if (value?.Motion is { } motion)
+                    _motion = motion;
             }
+        }
+
+        /// <summary>
+        /// How this node travels inside a view transition, whatever its <see cref="Transition"/>: null (the default)
+        /// takes the transition's own motion, anything else replaces it (<see cref="StraightMotion"/> for a straight
+        /// line in a transition that bends or teleports). So a node can arc through a transition that teleports
+        /// everything else, at that transition's pace. Changing it never triggers a pass.
+        /// </summary>
+        public ITransitionMotion Motion
+        {
+            get => _motion;
+            set => _motion = value;
         }
 
         /// <summary>

@@ -43,10 +43,11 @@ namespace TimboJimboEditor.UI.Layout
     }
 
     /// <summary>
-    /// Draws a node's transition: Inherit (the view transition's own) on one line, or Custom and then its duration
-    /// and ease, its delay and motion on a second line, and the chosen motion's own fields below. The choice of
-    /// Inherit or Custom is the hidden override flag stored next to the timing, and the motion is the node's
-    /// serialized reference beside it, picked from every <see cref="ITransitionMotion"/> type in the project.
+    /// Draws a node's transition in two parts that inherit separately. Timing: Inherit (the view transition's own)
+    /// on one line, or Custom and then its duration and ease, and its delay on a second line. Motion, on a line of
+    /// its own: Inherit (the view transition's own) or one of every <see cref="ITransitionMotion"/> type in the
+    /// project, with the chosen motion's fields below. The timing's choice is the hidden override flag stored next
+    /// to it, and the motion is the node's serialized reference beside it, null when it inherits.
     /// </summary>
     [CustomPropertyDrawer(typeof(NodeTransitionAttribute))]
     internal sealed class NodeTransitionDrawer : PropertyDrawer
@@ -57,7 +58,7 @@ namespace TimboJimboEditor.UI.Layout
         private static readonly string[] s_modes = { "Inherit", "Custom" };
         private static readonly GUIContent s_duration = new("Dur", "Duration in seconds; with no delay either, the node snaps");
         private static readonly GUIContent s_delay = new("Delay", "Delay in seconds");
-        private static readonly GUIContent s_motion = new("Motion", "How the node travels: Straight, or a motion (an arc, or your own ITransitionMotion)");
+        private static readonly GUIContent s_motion = new("Motion", "How the node travels, whatever its timing: Inherit takes the view transition's own motion; anything else replaces it");
 
         private static Type[] s_motionTypes;
         private static GUIContent[] s_motionNames;
@@ -65,13 +66,18 @@ namespace TimboJimboEditor.UI.Layout
         public override float GetPropertyHeight(SerializedProperty property, GUIContent label)
         {
             var overrides = property.serializedObject.FindProperty(OverrideField);
-            float line = EditorGUIUtility.singleLineHeight;
-            if (overrides == null || !overrides.boolValue)
-                return line;
-            float height = line * 2f + EditorGUIUtility.standardVerticalSpacing;
             var motion = property.serializedObject.FindProperty(MotionField);
-            foreach (var child in Children(motion))
-                height += EditorGUI.GetPropertyHeight(child, true) + EditorGUIUtility.standardVerticalSpacing;
+            float line = EditorGUIUtility.singleLineHeight;
+            float spacing = EditorGUIUtility.standardVerticalSpacing;
+            float height = line;
+            if (overrides != null && overrides.boolValue)
+                height += spacing + line;
+            if (motion != null)
+            {
+                height += spacing + line;
+                foreach (var child in Children(motion))
+                    height += EditorGUI.GetPropertyHeight(child, true) + spacing;
+            }
             return height;
         }
 
@@ -85,7 +91,9 @@ namespace TimboJimboEditor.UI.Layout
             var first = EditorGUI.PrefixLabel(new Rect(position.x, position.y, position.width, line), label);
             int indent = EditorGUI.indentLevel;
             EditorGUI.indentLevel = 0;
+            float labelWidth = EditorGUIUtility.labelWidth;
 
+            // Timing.
             float modeWidth = Mathf.Min(72f, first.width * 0.3f);
             var modeRect = new Rect(first.x, first.y, modeWidth, line);
             EditorGUI.showMixedValue = overrides.hasMultipleDifferentValues;
@@ -100,39 +108,38 @@ namespace TimboJimboEditor.UI.Layout
                     property.FindPropertyRelative("Duration").floatValue = 0f;
                     property.FindPropertyRelative("Ease").enumValueIndex = 0;
                     property.FindPropertyRelative("Delay").floatValue = 0f;
-                    if (motion != null) motion.managedReferenceValue = null;
                 }
             }
             EditorGUI.showMixedValue = false;
 
+            float y = first.y;
             if (overrides.boolValue)
             {
-                float labelWidth = EditorGUIUtility.labelWidth;
                 EditorGUIUtility.labelWidth = 44f;
                 var rest = new Rect(modeRect.xMax + Spacing, first.y, Mathf.Max(0f, first.width - modeWidth - Spacing), line);
                 float half = (rest.width - Spacing) * 0.5f;
                 EditorGUI.PropertyField(new Rect(rest.x, rest.y, half, line), property.FindPropertyRelative("Duration"), s_duration);
                 EditorGUI.PropertyField(new Rect(rest.x + half + Spacing, rest.y, half, line), property.FindPropertyRelative("Ease"), GUIContent.none);
-
-                // The second line lines up under the first line's fields, after the mode: delay, then motion.
-                float y = first.y + line + spacing;
-                float delayWidth = modeWidth + Spacing + half;
-                EditorGUI.PropertyField(new Rect(first.x, y, delayWidth, line), property.FindPropertyRelative("Delay"), s_delay);
-                if (motion != null)
-                {
-                    var motionRect = new Rect(first.x + delayWidth + Spacing, y, Mathf.Max(0f, first.width - delayWidth - Spacing), line);
-                    MotionPopup(motionRect, motion);
-                    EditorGUIUtility.labelWidth = labelWidth;
-                    // The motion's own fields, indented under the transition.
-                    y += line + spacing;
-                    foreach (var child in Children(motion))
-                    {
-                        float height = EditorGUI.GetPropertyHeight(child, true);
-                        EditorGUI.PropertyField(new Rect(first.x, y, first.width, height), child, true);
-                        y += height + spacing;
-                    }
-                }
+                // The delay lines up under the first line's fields, after the mode.
+                y += line + spacing;
+                EditorGUI.PropertyField(new Rect(first.x, y, modeWidth + Spacing + half, line), property.FindPropertyRelative("Delay"), s_delay);
                 EditorGUIUtility.labelWidth = labelWidth;
+            }
+
+            // Motion, then its own fields indented under it.
+            if (motion != null)
+            {
+                y += line + spacing;
+                EditorGUIUtility.labelWidth = 52f;
+                MotionPopup(new Rect(first.x, y, first.width, line), motion);
+                EditorGUIUtility.labelWidth = labelWidth;
+                y += line + spacing;
+                foreach (var child in Children(motion))
+                {
+                    float height = EditorGUI.GetPropertyHeight(child, true);
+                    EditorGUI.PropertyField(new Rect(first.x, y, first.width, height), child, true);
+                    y += height + spacing;
+                }
             }
 
             EditorGUI.indentLevel = indent;
@@ -166,7 +173,7 @@ namespace TimboJimboEditor.UI.Layout
             types.Sort((a, b) => string.CompareOrdinal(a.Name, b.Name));
             s_motionTypes = types.ToArray();
             s_motionNames = new GUIContent[s_motionTypes.Length + 1];
-            s_motionNames[0] = new GUIContent("Straight");
+            s_motionNames[0] = new GUIContent("Inherit", "The view transition's own motion");
             for (int i = 0; i < s_motionTypes.Length; i++)
             {
                 var name = s_motionTypes[i].Name;

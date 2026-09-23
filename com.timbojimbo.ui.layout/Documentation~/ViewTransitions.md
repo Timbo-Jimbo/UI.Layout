@@ -90,12 +90,24 @@ public sealed class PopMotion : ITransitionMotion
 }
 ```
 
-A node can set its own **Transition** in the inspector: **Inherit** uses the call's timing, **Custom** sets its own (duration, ease, delay and motion). A Custom with no duration and no delay (`LayoutTransition.Instant` in code) makes that node snap while everything around it animates.
+A node can set its own **Transition** in the inspector, in two parts that inherit separately. Its timing: **Inherit** uses the call's, **Custom** sets its own duration, ease and delay; a Custom with no duration and no delay (`LayoutTransition.Instant` in code) makes that node snap while everything around it animates. Its **Motion**: **Inherit** uses the call's, anything else replaces it (**Straight** for a straight line where the call bends or teleports).
+
+So the motion usually belongs to the interaction that makes the change (a switch arcs, a choice pops), passed with the call, and a node sets its own only when it should travel differently from what moves around it: a wallet that arcs through a tab switch that teleports, at the switch's pace.
 
 ```csharp
-knob.Transition = LayoutTransition.Over(0.18f);     // this node moves faster
+knob.Transition = LayoutTransition.Over(0.18f);     // this node moves faster, however the call has it travel
 badge.Transition = LayoutTransition.Instant;        // this one snaps
 badge.Transition = null;                            // back to the call's timing
+wallet.Motion = new ArcMotion(0.5f);                // arcs at the call's pace, whatever the call's motion
+wallet.Motion = null;                               // back to the call's motion
+```
+
+A setting for the whole UI, whoever authored the moves, goes in `LayoutSystem.AdjustTransition`: a function that gets each node and the timing and motion it resolved, and returns what it moves with instead. A "reduce motion" option is the classic use:
+
+```csharp
+LayoutSystem.AdjustTransition = reduceMotion
+    ? (node, t) => t.With(new StraightMotion())      // no arcs or teleports, same timing
+    : null;                                          // everything as authored
 ```
 
 ## Matching by name

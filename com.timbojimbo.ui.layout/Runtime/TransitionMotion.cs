@@ -8,7 +8,7 @@ namespace TimboJimbo.UI.Layout
     /// how far along the transition is, a <see cref="MotionFrame"/> saying where its centre is, how big it is and how
     /// it looks right now. The engine is the only thing that touches objects: it applies the frame each tick and
     /// takes the look off when the move ends, however it ends. Set one on a <see cref="LayoutTransition"/> with
-    /// <see cref="LayoutTransition.With"/>, or on a node's own transition in the inspector. No motion is a straight
+    /// <see cref="LayoutTransition.With"/>, or on a node as its own <see cref="LayoutNode.Motion"/>. No motion is a straight
     /// line whose contents change with the eased progress; <see cref="ArcMotion"/> bends the line. A motion shapes
     /// only what moves as a whole: what is inside it, a node moving inside a moving parent or a part flying inside a
     /// flying container, rides it and changes from its old place to its new one with its <see cref="MotionFrame.Morph"/>. Write one as a plain [Serializable] class with a parameterless constructor so the
@@ -80,6 +80,16 @@ namespace TimboJimbo.UI.Layout
             Opacity = 1f,
             Morph = input.Eased,
         };
+    }
+
+    /// <summary>
+    /// A straight line whose contents change with the eased progress: what a move does with no motion. Set it as a
+    /// node's <see cref="LayoutNode.Motion"/> to go straight in a transition whose motion bends or teleports.
+    /// </summary>
+    [Serializable]
+    public sealed class StraightMotion : ITransitionMotion
+    {
+        public MotionFrame Evaluate(in MotionInput input) => MotionFrame.Straight(input);
     }
 
     /// <summary>

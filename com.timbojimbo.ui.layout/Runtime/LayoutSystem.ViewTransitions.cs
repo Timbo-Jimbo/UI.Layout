@@ -148,6 +148,14 @@ namespace TimboJimbo.UI.Layout
             return vt;
         }
 
+        /// <summary>
+        /// Adjusts how every node moves in every view transition: called with the node and the timing and motion
+        /// it resolved (its own, else the transition's), it returns what the node moves with instead. Null (the
+        /// default) leaves them alone. For a setting that applies to the whole UI whoever authored the moves, such
+        /// as a "reduce motion" option that drops every motion or shortens every move.
+        /// </summary>
+        public static Func<LayoutNode, LayoutTransition, LayoutTransition> AdjustTransition { get; set; }
+
         /// <summary>The view transition started most recently that is still in flight, or null.</summary>
         public static ViewTransition CurrentViewTransition => s_active.Count > 0 ? s_active[s_active.Count - 1] : null;
 

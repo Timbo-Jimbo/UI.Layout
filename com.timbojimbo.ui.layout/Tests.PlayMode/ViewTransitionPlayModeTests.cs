@@ -60,6 +60,7 @@ namespace TimboJimboTests.UI.Layout.PlayMode
         [UnityTearDown]
         public IEnumerator TearDown()
         {
+            LayoutSystem.AdjustTransition = null;
             LayoutSystem.SkipAllViewTransitions();
             Object.Destroy(_canvas);
             yield return null;
@@ -995,6 +996,50 @@ namespace TimboJimboTests.UI.Layout.PlayMode
             Assert.That(transition.Motion, Is.InstanceOf<ArcMotion>(), "Curved is an arc motion");
             Assert.That(transition.After(0.2f).Motion, Is.SameAs(transition.Motion), "After keeps the motion");
             Assert.That(LayoutTransition.Over(1f).Curved(0f).Motion, Is.Null, "no curvature is no motion: a straight line");
+        }
+
+        [UnityTest]
+        public IEnumerator Motion_AndTimingInheritSeparately()
+        {
+            var root = Node(_canvas.transform, "Root", Sizing.Fixed(300f), Sizing.Fixed(300f));
+            var ownMotion = Node(root.transform, "Own motion", Sizing.Fixed(20f), Sizing.Fixed(20f));
+            var ownTiming = Node(root.transform, "Own timing", Sizing.Fixed(20f), Sizing.Fixed(20f));
+            ownMotion.Motion = new StraightMotion();
+            ownTiming.Transition = LayoutTransition.Over(2f, EaseType.Linear);
+            yield return null;
+
+            var vt = LayoutSystem.StartViewTransition(() => root.Padding = Insets.Of(left: 100f, top: 40f),
+                LayoutTransition.Over(1f, EaseType.Linear).Curved(1f));
+            Assert.That(ownMotion._animTransition.Motion, Is.InstanceOf<StraightMotion>(), "a node's own motion replaces the transition's");
+            Assert.That(ownMotion._animTransition.Duration, Is.EqualTo(1f), "at the transition's pace");
+            Assert.That(ownTiming._animTransition.Motion, Is.InstanceOf<ArcMotion>(), "a node with only its own timing keeps the transition's motion");
+            Assert.That(ownTiming._animTransition.Duration, Is.EqualTo(2f), "at its own pace");
+            Assert.That(ownTiming.Transition?.Motion, Is.Null, "a node's timing never carries a motion");
+            yield return Finish(vt);
+        }
+
+        [UnityTest]
+        public IEnumerator AdjustTransition_ChangesHowEveryNodeMoves_WhoeverAuthoredIt()
+        {
+            var root = Node(_canvas.transform, "Root", Sizing.Fixed(300f), Sizing.Fixed(300f));
+            var plain = Node(root.transform, "Plain", Sizing.Fixed(20f), Sizing.Fixed(20f));
+            var authored = Node(root.transform, "Authored", Sizing.Fixed(20f), Sizing.Fixed(20f));
+            authored.Transition = LayoutTransition.Over(0.5f).Curved(1f);
+            yield return null;
+
+            LayoutSystem.AdjustTransition = (node, t) =>
+            {
+                t.Duration *= 2f;
+                return t.With(new StraightMotion());
+            };
+            var vt = LayoutSystem.StartViewTransition(() => root.Padding = Insets.Of(left: 100f, top: 40f),
+                LayoutTransition.Over(1f, EaseType.Linear).Curved(1f));
+            Assert.That(plain._animTransition.Duration, Is.EqualTo(2f), "the call's timing, adjusted");
+            Assert.That(authored._animTransition.Duration, Is.EqualTo(1f), "a node's own timing, adjusted too");
+            Assert.That(plain._animTransition.Motion, Is.InstanceOf<StraightMotion>());
+            Assert.That(authored._animTransition.Motion, Is.InstanceOf<StraightMotion>(), "whoever authored the motion");
+            LayoutSystem.AdjustTransition = null;
+            yield return Finish(vt);
         }
 
         [UnityTest]
