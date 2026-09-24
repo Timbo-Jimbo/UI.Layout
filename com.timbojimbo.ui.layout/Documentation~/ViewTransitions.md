@@ -46,7 +46,7 @@ Text keeps its final size and only moves (it would re-wrap at sizes in between);
 
 - **Show** with `SetActive(true)`, or `LayoutSystem.Show(node)`.
 - **Take out** with `LayoutSystem.Exit(node, onExited)`. The node plays its exit while the rest closes up, then its object is deactivated and `onExited` runs (destroy it, pool it, or leave it for next time).
-- **Hide in place** with `LayoutSystem.Hide(node)`, like CSS `visibility: hidden` beside `Exit`'s `display: none`: the node keeps its space but isn't drawn and takes no clicks, and to transitions it's gone, names and all. It fades out where it is, or flies into a node that appears with its name (see [matching by name](#matching-by-name)). `Show` brings it back.
+- **Hide in place** with `LayoutSystem.Hide(node)`, like CSS `visibility: hidden` beside `Exit`'s `display: none`: the node keeps its space but isn't drawn and takes no clicks, and to transitions it's gone, names and all. It plays its animator's exit where it is (or fades out there without one), or flies into a node that appears with its name (see [matching by name](#matching-by-name)). `Show` brings it back. Hiding and then exiting is how a list item plays out before the list closes up: hide it, and when that transition finishes, exit it; it has gone from view already, so it plays no second exit and the rest closes up at once.
 - **Bring back something that is leaving** with `LayoutSystem.Show(node)`: its exit is cancelled and, inside a transition, it enters again (a fade goes back up from wherever it had got to; an exit effect is stopped and its enter effect plays). `SetActive(true)` can't do this, since a leaving object is still active.
 - `node.Shown` reads "active, not leaving and not hidden", and setting it calls `Show` or `Exit`.
 
@@ -60,7 +60,7 @@ Outside a transition, `Exit` still plays the node's [exit effect](#custom-enter-
 
 ## Timing
 
-A transition's timing is a `LayoutTransition`: a duration, an ease and an optional delay, a quarter second easing out by default.
+A transition's timing is a `LayoutTransition`: a duration and an optional delay, with a **motion** saying how things travel. `Over(duration, ease)` is a straight slide on that ease; the default is a quarter second easing out.
 
 ```csharp
 LayoutSystem.StartViewTransition(Change, LayoutTransition.Over(0.4f, EaseType.OutBack));
@@ -69,44 +69,43 @@ LayoutSystem.StartViewTransition(() => LayoutSystem.Exit(item, () => Destroy(ite
     LayoutTransition.Over(0.25f).After(0.2f));
 ```
 
-A **motion** says how things travel. Without one they go in a straight line. `ArcMotion` bends the path into a smooth arc that sets off along the shorter axis and arrives along the longer one, for panels that swing into place rather than slide; `Curved(c)` is the shorthand. Only what moves as a whole follows a motion: the parts inside a moving panel ride along with it.
+A `LayoutMotion` has two phases: **Depart** takes a node out of where it was and **Arrive** brings it into where it is going, with an optional **Gap** between them. Each phase can **move** it along the path, **fade** it and **scale** it (to nothing departing, from nothing arriving), on its own **ease**. **Midpoint** says where in the duration the departure ends.
+
+- When both phases move they share the path half each, wherever the midpoint is: with a midpoint of 0.25 the node is halfway there a quarter of the way through.
+- When only one moves it covers the whole path, and the other holds still: a **Drop** (no departure, an arrival that moves and fades in) falls into place from where it came from.
+- When neither moves the node jumps across in the gap: a teleport. **Pop**, **Soft**, **Blink**, **Snap** and **Wobble** are teleports with different eases, fades and pauses.
+- **Curvature** bends the path into an arc that sets off along the shorter axis and arrives along the longer one; `Curved(c)` is the shorthand.
+
+A matched pair's two halves, and the parts riding inside a travelling node, change from their old state to their new one as the path is travelled: gradually while the node moves, at once where it jumps, so a teleport's contents appear already in their new arrangement. Only what moves as a whole follows a motion: the parts inside a moving panel ride along with it. A node entering or leaving where it stands is not shaped; its fade follows the phases' eases.
 
 ```csharp
-LayoutSystem.StartViewTransition(Change, LayoutTransition.Over(0.35f).Curved(0.6f));
-```
-
-Write your own by implementing `ITransitionMotion`, a pure function: given where the thing starts and ends and how far along it is, return a `MotionFrame` with its centre, size, a scale around its centre, an opacity, and a **morph**: how far its contents have gone from the old state to the new, 0 to 1. A matched pair's two halves blend by it, and the parts riding inside move from their old place to their new one by it. The default moves it with the eased progress, a cross-fade with the parts gliding into place; hold it at 0 and jump it to 1 while nothing shows, as the teleport does, and the contents stay pinned in their old arrangement until they appear in their new one. The engine is the only thing that touches the objects, and takes the look off when the move ends. Make it a `[Serializable]` class with a parameterless constructor and it appears in the inspector's Motion list; keep it stateless, since one instance may drive many moves. The GameUI demo's `TeleportMotion` (shrink and fade out, reappear at the target, pop and settle) is an example.
-
-```csharp
-[Serializable]
-public sealed class PopMotion : ITransitionMotion
+LayoutSystem.StartViewTransition(Change, LayoutTransition.Over(0.35f).Curved(0.6f));      // an arc
+LayoutSystem.StartViewTransition(Change, LayoutTransition.Over(0.5f).With(LayoutMotion.Pop));   // a teleport
+var fall = new LayoutMotion                                                                  // your own
 {
-    public MotionFrame Evaluate(in MotionInput input)
-    {
-        var frame = MotionFrame.Straight(input);          // the straight line...
-        frame.Scale = 1f + 0.2f * Mathf.Sin(input.Progress * Mathf.PI);   // ...swelling on the way
-        return frame;
-    }
-}
+    Midpoint = 0.3f,
+    Depart = new MotionPhase(move: true, fade: false, scale: false, EaseType.InQuad),
+    Arrive = new MotionPhase(move: true, fade: false, scale: false, EaseType.OutBounce),
+};
 ```
 
-A node can set its own **Transition** in the inspector, in two parts that inherit separately. Its timing: **Inherit** uses the call's, **Custom** sets its own duration, ease and delay; a Custom with no duration and no delay (`LayoutTransition.Instant` in code) makes that node snap while everything around it animates. Its **Motion**: **Inherit** uses the call's, anything else replaces it (**Straight** for a straight line where the call bends or teleports).
+A node can set its own **Transition** in the inspector, in two parts that inherit separately. Its timing: **Inherit** uses the call's, **Custom** sets its own duration and delay; a Custom with no duration and no delay (`LayoutTransition.Instant` in code) makes that node snap while everything around it animates. Its **Motion**: **Inherit** uses the call's, **Custom** sets its own, starting from a preset or field by field.
 
 So the motion usually belongs to the interaction that makes the change (a switch arcs, a choice pops), passed with the call, and a node sets its own only when it should travel differently from what moves around it: a wallet that arcs through a tab switch that teleports, at the switch's pace.
 
 ```csharp
-knob.Transition = LayoutTransition.Over(0.18f);     // this node moves faster, however the call has it travel
-badge.Transition = LayoutTransition.Instant;        // this one snaps
-badge.Transition = null;                            // back to the call's timing
-wallet.Motion = new ArcMotion(0.5f);                // arcs at the call's pace, whatever the call's motion
-wallet.Motion = null;                               // back to the call's motion
+knob.Transition = new LayoutTransition { Duration = 0.18f };  // this node moves faster, however the call has it travel
+badge.Transition = LayoutTransition.Instant;                    // this one snaps
+badge.Transition = null;                                        // back to the call's timing
+wallet.Motion = LayoutMotion.Slide().Curved(0.5f);              // arcs at the call's pace, whatever the call's motion
+wallet.Motion = null;                                           // back to the call's motion
 ```
 
 A setting for the whole UI, whoever authored the moves, goes in `LayoutSystem.AdjustTransition`: a function that gets each node and the timing and motion it resolved, and returns what it moves with instead. A "reduce motion" option is the classic use:
 
 ```csharp
 LayoutSystem.AdjustTransition = reduceMotion
-    ? (node, t) => t.With(new StraightMotion())      // no arcs or teleports, same timing
+    ? (node, t) => t.With(LayoutMotion.Slide())      // no arcs or teleports, same timing
     : null;                                          // everything as authored
 ```
 
@@ -124,6 +123,29 @@ LayoutSystem.StartViewTransition(() => { LayoutSystem.Show(card); LayoutSystem.E
 ```
 
 A name found in only one of the two states does nothing special. The same name on two nodes at once skips the whole transition with a warning.
+
+A node with no counterpart can still come from somewhere. Give it a **View Transition Origin**, any `RectTransform`, and it grows out of the origin's rect when it enters, as though its other half were just that rect, and undoes that when it leaves, shrinking back into the origin. Leaving is a move of its own, not the entrance rewound: what faded in fades out, but on the same ease running forwards in time, so it keeps pace with everything else in that transition (a page shrinking into its tile beside the tile's own parts). The origin takes no part: it doesn't move, hide or need a name. A popover opening out of its button is the classic case; with a `LayoutMotion.Drop` it falls out of the button fading in, and rises back into it on the way out. A name pairing the node wins over its origin.
+
+```csharp
+popover.ViewTransitionOrigin = button.RectTransform;   // scene data, or set just before showing (a menu from the row clicked)
+popover.Motion = LayoutMotion.Drop;
+LayoutSystem.StartViewTransition(() => LayoutSystem.Show(popover));   // out of the button
+LayoutSystem.StartViewTransition(() => LayoutSystem.Exit(popover));   // back into it
+```
+
+While a node flies, its rect goes from one size to the other, and by default its content keeps the layout it has, so a growing node uncovers its content and a shrinking one clips it. That suits a card opening into a page, where the two are laid out differently. For two halves laid out alike at different sizes, such as a compact wallet and a detailed one, set **View Transition Fit** to **Scale** on both: each keeps its own layout and is scaled to the moving rect, a morph, like the web's scaled snapshots. It scales uniformly, by the width. A named part inside still flies its own way, a kept or carried object always resizes, and it works for a node growing out of its origin too.
+
+```csharp
+compactWallet.ViewTransitionFit = ViewTransitionFit.Scale;
+detailedWallet.ViewTransitionFit = ViewTransitionFit.Scale;
+```
+
+For two halves of different shapes, a uniform scale can't fill the rect: a wide tile scaled to a tall page's width is still far shorter than the page. **Stretch** scales each axis on its own so each half fills the moving rect exactly, its content stretched and squashed on the way, like the web's `object-fit: fill`. It suits a tile opening into a page, where the two read as one thing growing.
+
+```csharp
+tile.ViewTransitionFit = ViewTransitionFit.Stretch;
+page.ViewTransitionFit = ViewTransitionFit.Stretch;
+```
 
 ## Names in lists
 

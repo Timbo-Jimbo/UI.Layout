@@ -220,6 +220,8 @@ namespace TimboJimbo.UI.Layout
                     continue;
 
                 node._exitStarted = true;
+                if (LeavesHidden(node))
+                    continue;
                 if (node.TryGetComponent(out IViewTransitionAnimator animator))
                     RunExitEffect(node, animator, null);
                 else

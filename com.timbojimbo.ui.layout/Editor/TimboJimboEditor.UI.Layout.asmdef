@@ -3,7 +3,8 @@
     "rootNamespace": "TimboJimboEditor.UI.Layout",
     "references": [
         "TimboJimbo.UI.Layout.Runtime",
-        "UnityEngine.UI"
+        "UnityEngine.UI",
+        "TimboJimbo.Core.Runtime"
     ],
     "includePlatforms": [
         "Editor"

@@ -183,6 +183,9 @@ namespace TimboJimbo.UI.Layout
             if (node._hidden)
             {
                 node._hidden = false;
+                // A hide's exit effect still playing is cut short; its late done is told apart by the token.
+                node._exitToken++;
+                SkipHideEffects(node);
                 LayoutEngine.Reveal(node);
                 // Caught fading out: inside an update it enters again from where the fade has got to; outside one
                 // it is simply shown.
@@ -229,9 +232,10 @@ namespace TimboJimbo.UI.Layout
         /// <summary>
         /// Hides <paramref name="node"/> in its place, as CSS <c>visibility: hidden</c> does beside
         /// <see cref="Exit"/>'s <c>display: none</c>: the tree goes on laying it out, but it is not drawn and takes
-        /// no clicks, and to view transitions it is gone, its names with it. Inside a view transition it fades out
-        /// where it is, or, when a node that appears takes its name, flies out into that node and then waits in its
-        /// slot unseen, like a card that opens into a dialog; <see cref="Show"/> in a later transition brings it
+        /// no clicks, and to view transitions it is gone, its names with it. Inside a view transition it plays its
+        /// <see cref="IViewTransitionAnimator"/>'s exit where it is, or fades out there without one, then rests
+        /// unseen; or, when a node that appears takes its name, it flies out into that node and then waits in its
+        /// slot unseen, like a card that opens into a dialog. <see cref="Show"/> in a later transition brings it
         /// back, so a node leaving with the name lands onto it. Outside one it goes at once. Hiding is the running
         /// UI's: outside play mode the node is only marked, and still drawn. A node on its way out is left to go.
         /// </summary>
@@ -356,7 +360,7 @@ namespace TimboJimbo.UI.Layout
                 if (InScope(next, flight.Node) || InScope(next, flight.Marker))
                 {
                     flight.Elapsed = flight.Transition.Total;
-                    WriteFlight(old, flight, 1f, 1f);
+                    WriteFlight(old, flight, 1f);
                     flight.Done = true;
                     continue;
                 }
@@ -475,7 +479,7 @@ namespace TimboJimbo.UI.Layout
                 if (node == null || !node._exiting || node._exitStarted || !node.isActiveAndEnabled || !InScope(vt, node)) continue;
                 node._exitStarted = true;
                 if (IsFlyingOldHalf(vt, node)) continue;
-                vt.Groups.Add(new ViewTransition.Group { Kind = ViewTransition.GroupKind.Exit, Old = node, OldFlies = true });
+                vt.Groups.Add(new ViewTransition.Group { Kind = ViewTransition.GroupKind.Exit, Old = node, OldFlies = true, Origin = ActiveOrigin(node) });
             }
 
             // Enters: the topmost node of every subtree that appeared, and is not the new half of a pair; nodes
@@ -486,7 +490,7 @@ namespace TimboJimbo.UI.Layout
                 if (!InScope(vt, node) || IsScope(vt, node)) continue;
                 if (node._parentNode != null && node._parentNode._captureId != vt.Id) continue;
                 if (vt.IsGrouped(node)) continue;
-                vt.Groups.Add(new ViewTransition.Group { Kind = ViewTransition.GroupKind.Enter, New = node });
+                vt.Groups.Add(new ViewTransition.Group { Kind = ViewTransition.GroupKind.Enter, New = node, Origin = ActiveOrigin(node) });
             }
 
             vt.Groups.Sort(s_byCapture);
@@ -554,7 +558,17 @@ namespace TimboJimbo.UI.Layout
                     {
                         var node = g.Old;
                         var t = vt.TransitionFor(node);
-                        if (node.TryGetComponent(out IViewTransitionAnimator animator))
+                        if (LeavesHidden(node))
+                            break;
+                        if (g.Origin != null && t.IsAnimated)
+                        {
+                            // Back into its origin: lifted, it undoes its entrance (its motion mirrored) towards the
+                            // origin's rect, read live, fading out, and leaves when the flight lands.
+                            Lift(node);
+                            vt.Flights.Add(new ViewTransition.Flight { Node = node, Marker = g.Origin, From = node._capturedWorld, Transition = t, Size = SizeRuleFor(node, ViewTransition.SizeRule.KeepFrom), Reverse = true });
+                            LayoutEngine.StartFade(node, false, passThrough: true);
+                        }
+                        else if (node.TryGetComponent(out IViewTransitionAnimator animator))
                             RunExitEffect(node, animator, vt);
                         else if (t.IsAnimated)
                         {
@@ -571,7 +585,18 @@ namespace TimboJimbo.UI.Layout
                     {
                         var node = g.New;
                         var t = vt.TransitionFor(node);
-                        if (node.TryGetComponent(out IViewTransitionAnimator animator))
+                        if (g.Origin != null && t.IsAnimated)
+                        {
+                            // Out of its origin: lifted like a pair's new half, it flies from the origin's rect (where
+                            // it was shown before the update, if it is a node) into its slot, fading in.
+                            var from = g.Origin.TryGetComponent<LayoutNode>(out var originNode) && originNode._captureId == vt.Id
+                                ? originNode._capturedWorld
+                                : LayoutEngine.WorldRect(g.Origin);
+                            Lift(node);
+                            vt.Flights.Add(new ViewTransition.Flight { Node = node, Marker = node._placeholder.transform, From = from, Transition = t, Size = SizeRuleFor(node, ViewTransition.SizeRule.KeepDestination) });
+                            LayoutEngine.StartFade(node, true);
+                        }
+                        else if (node.TryGetComponent(out IViewTransitionAnimator animator))
                             RunEnterEffect(node, animator, vt);
                         else if (t.IsAnimated)
                         {
@@ -618,15 +643,18 @@ namespace TimboJimbo.UI.Layout
                 WriteNow(node);
             }
 
-            // Hides: a node the update hid fades out where layout has it (moving there with the rest if its slot
-            // moved) and rests there unseen when the fade ends, as the old half of a pair does when its flight
-            // lands. One the transition does not animate goes at once.
+            // Hides: a node the update hid plays its animator's exit where it is, or fades out where layout has it
+            // (moving there with the rest if its slot moved), and rests there unseen when that ends, as the old half
+            // of a pair does when its flight lands. One the transition does not animate goes at once.
             for (int i = 0; i < s_hiding.Count; i++)
             {
                 var node = s_hiding[i];
                 if (node == null || !node._hidden) continue;
                 var t = vt.TransitionFor(node);
-                if (!node._lifted && node._captureId == vt.Id && node.isActiveAndEnabled && t.IsAnimated)
+                bool inPlace = !node._lifted && node._captureId == vt.Id && node.isActiveAndEnabled;
+                if (inPlace && node.TryGetComponent(out IViewTransitionAnimator animator))
+                    RunHideEffect(node, animator, vt);
+                else if (inPlace && t.IsAnimated)
                 {
                     if (!node._animating)
                     {
@@ -704,9 +732,13 @@ namespace TimboJimbo.UI.Layout
                 }
                 flight.Elapsed += deltaTime;
                 bool landing = flight.Elapsed >= flight.Transition.Total;
+                // A part riding a container moves by the container's morph, not by its own clock, so it lands when
+                // the container does: stopping on its own time would leave it where it was while the container goes
+                // on, and it would jump into place at the end. The container is written first, so it is up to date.
+                if (!flight.Reverse && LiftedAncestorOf(vt, flight, out var ancestorFlight) != null)
+                    landing = ancestorFlight.Done;
                 float progress = landing ? 1f : Progress(flight);
-                float eased = EaseUtilityEvaluate(progress, flight.Transition.Ease);
-                WriteFlight(vt, flight, progress, eased);
+                WriteFlight(vt, flight, progress);
                 if (flight.LayoutEachTick)
                     LayoutLifted(node);
                 // A flying half of a pair fades by its frame's morph; the motion decides how the two halves show.
@@ -722,43 +754,72 @@ namespace TimboJimbo.UI.Layout
             return flight.Transition.Duration > 0f ? Mathf.Clamp01(elapsed / flight.Transition.Duration) : elapsed >= 0f ? 1f : 0f;
         }
 
-        private static float EaseUtilityEvaluate(float t, TimboJimbo.Core.EaseType ease) => TimboJimbo.Core.EaseUtility.Evaluate(t, ease);
-
         // Puts a flight at its point between where it started and where its marker is now, in the layer. A flight
-        // on its own follows its transition's motion (a straight line morphing on the eased progress without one):
+        // on its own follows its transition's motion (a straight slide when it names none):
         // its centre, its size, and its look (a scale around the centre, an opacity, and the morph the halves of a
         // pair blend by). A part flying inside a flying container rides the container instead: its offset from the
         // container's centre and its size go straight from what they were to what they will be by the container's
         // morph, scaled with the container, and it takes the container's look, so a panel carries its parts along
         // its path, and a panel that shrinks, fades or holds its old arrangement until it swaps takes them with it.
-        private static void WriteFlight(ViewTransition vt, ViewTransition.Flight flight, float progress, float eased)
+        // A flight on its own scaled to fit keeps its node at its own size and scales it to the size the motion gives.
+        private static void WriteFlight(ViewTransition vt, ViewTransition.Flight flight, float progress)
         {
             var to = Destination(vt, flight);
             var from = flight.From;
-            switch (flight.Size)
-            {
-                case ViewTransition.SizeRule.KeepDestination: from.size = to.size; break;
-                case ViewTransition.SizeRule.KeepFrom: to.size = from.size; break;
-            }
             var node = flight.Node;
+            // A flight into an origin is on its own: it plays its mirrored motion rather than riding anything.
+            ViewTransition.Flight ancestorFlight = null;
+            var ancestor = flight.Reverse ? null : LiftedAncestorOf(vt, flight, out ancestorFlight);
+            // Scaled to fit, the node's size never changes, so content that cannot be drawn between two sizes still
+            // goes from one to the other; a part riding a container takes the container's scale instead, and a kept
+            // object laid out each tick follows its rect.
+            bool fit = ancestor == null && !flight.LayoutEachTick && node.ViewTransitionFit != ViewTransitionFit.Resize;
+            var own = flight.Marker != null && node._placeholder != null && flight.Marker == node._placeholder.transform ? to.size : from.size;
+            if (!fit)
+            {
+                switch (flight.Size)
+                {
+                    case ViewTransition.SizeRule.KeepDestination: from.size = to.size; break;
+                    case ViewTransition.SizeRule.KeepFrom: to.size = from.size; break;
+                }
+            }
             MotionFrame frame;
-            var ancestor = LiftedAncestorOf(vt, flight, out var ancestorFlight);
             if (ancestor != null)
             {
-                var offsetFrom = Centre(from) - Centre(ancestorFlight.From);
+                // Where the part started, in the container's own layout: a container scaled to fit started at a
+                // scale of its own.
+                var fitFrom = new Vector2(
+                    ancestorFlight.FitFrom.x > 1e-3f ? ancestorFlight.FitFrom.x : 1f,
+                    ancestorFlight.FitFrom.y > 1e-3f ? ancestorFlight.FitFrom.y : 1f);
+                var offsetFrom = (Centre(from) - Centre(ancestorFlight.From)) / fitFrom;
                 var offsetTo = Centre(to) - Centre(Destination(vt, ancestorFlight));
                 float morph = ancestor._lookMorph;
                 frame = new MotionFrame
                 {
-                    Centre = Centre(RidingFrame(ancestor, ancestorFlight)) + Vector2.LerpUnclamped(offsetFrom, offsetTo, morph) * ancestor._lookScale,
-                    Size = Vector2.LerpUnclamped(from.size, to.size, morph),
+                    Centre = Centre(RidingFrame(ancestor, ancestorFlight)) + Vector2.Scale(Vector2.LerpUnclamped(offsetFrom, offsetTo, morph), ancestor._lookScale),
+                    Size = Vector2.LerpUnclamped(from.size / fitFrom, to.size, morph),
                     Scale = ancestor._lookScale,
                     Opacity = ancestor._lookOpacity,
                     Morph = morph,
                 };
             }
             else
-                frame = flight.Transition.Evaluate(new MotionInput(Centre(from), Centre(to), from.size, to.size, progress, eased));
+            {
+                // The bend is decided from where the flight starts and kept, though its end moves (a page sliding in).
+                // A flight into an origin is an entrance undone: its motion mirrored, played forwards like any other,
+                // so it eases and bends as the pairs flying beside it do.
+                flight.AcrossFirst ??= LayoutMotion.AcrossFirst(Centre(from), Centre(to));
+                var transition = flight.Reverse ? flight.Transition.Mirrored() : flight.Transition;
+                frame = transition.Evaluate(Centre(from), Centre(to), from.size, to.size, progress, flight.AcrossFirst);
+            }
+            if (fit)
+            {
+                // Laid out at its own size, scaled to the motion's around the centre, on top of any scale the motion adds.
+                bool stretch = node.ViewTransitionFit == ViewTransitionFit.Stretch;
+                flight.FitFrom = FitScale(from.size, own, stretch);
+                frame.Scale = Vector2.Scale(frame.Scale, FitScale(frame.Size, own, stretch));
+                frame.Size = own;
+            }
             var world = new Rect(frame.Centre.x - frame.Size.x * 0.5f, frame.Centre.y + frame.Size.y * 0.5f, frame.Size.x, frame.Size.y);
             flight.LastRect = world;
             LayoutEngine.SetLook(node, frame);
@@ -788,6 +849,17 @@ namespace TimboJimbo.UI.Layout
             }
         }
 
+        // The scale that takes a node of its own size to a size: uniform, by the width, as the web scales a snapshot,
+        // or stretched, each axis on its own so it fills the size exactly (an axis the node has no size on keeps the
+        // other's scale).
+        private static Vector2 FitScale(Vector2 size, Vector2 own, bool stretch)
+        {
+            float uniform = own.x > 1e-3f ? size.x / own.x : own.y > 1e-3f ? size.y / own.y : 1f;
+            if (!stretch)
+                return new Vector2(uniform, uniform);
+            return new Vector2(own.x > 1e-3f ? size.x / own.x : uniform, own.y > 1e-3f ? size.y / own.y : uniform);
+        }
+
         // Where a flight lands: its marker's rect on screen right now (so scrolling or a reflow during the
         // transition is honoured), corrected for any lifted ancestor of the marker so the line stays straight: a
         // lifted node's subtree is rigid, so the marker sits at a fixed offset from wherever that ancestor ends.
@@ -803,10 +875,10 @@ namespace TimboJimbo.UI.Layout
                 // The marker is drawn inside the container, so the container's look scales it; take that back out
                 // (around the container's centre) to measure it against the container as laid out.
                 var ancestorNow = RidingFrame(ancestor, ancestorFlight);
-                float scale = ancestor._lookScale;
-                if (!Mathf.Approximately(scale, 1f))
+                var scale = ancestor._lookScale;
+                if (!LayoutEngine.IsUnscaled(scale))
                 {
-                    if (scale < 1e-3f)
+                    if (scale.x < 1e-3f || scale.y < 1e-3f)
                         return flight.LastDestination;
                     var pivot = Centre(ancestorNow);
                     var centre = pivot + (Centre(world) - pivot) / scale;
@@ -860,7 +932,11 @@ namespace TimboJimbo.UI.Layout
             node._placeholder = placeholder;
             node._lifted = true;
             node._tracker.Clear();
+            // Kept where it is on screen, but with its own scale: a scaled container's is already in the rect the
+            // flight starts from, and taken into the node's own it would stay with it after it lands.
+            var scale = rt.localScale;
             rt.SetParent(layer, true);
+            rt.localScale = scale;
             rt.SetAsLastSibling();
             layer.SetAsLastSibling();
         }
@@ -1097,6 +1173,68 @@ namespace TimboJimbo.UI.Layout
             });
         }
 
+        /// <summary>
+        /// Hands a node <see cref="Hide"/> took out to its animator's exit, in its place. The node rests unseen when
+        /// the effect reports done, provided it is still the same hide.
+        /// </summary>
+        private static void RunHideEffect(LayoutNode node, IViewTransitionAnimator animator, ViewTransition vt)
+        {
+            int token = node._exitToken;
+            var effect = vt.AddEffect(node, animator, true);
+            effect.IsHide = true;
+            animator.Exit(vt, () =>
+            {
+                if (node != null && node._hidden && node._exitToken == token)
+                {
+                    LayoutEngine.Conceal(node);
+                    // Taken out meanwhile (see LeavesHidden): it has gone from view, so it leaves now.
+                    if (node._exiting)
+                        Conclude(node, node._exitThen);
+                }
+                CompleteEffect(effect);
+            });
+        }
+
+        /// <summary>
+        /// A hidden node taken out has already gone from view, or is going, its hide playing its animator's exit: it
+        /// plays no exit of its own, but leaves when that ends, or at once. False for one still fading out, which
+        /// leaves as any other exit does.
+        /// </summary>
+        internal static bool LeavesHidden(LayoutNode node)
+        {
+            if (!node._hidden) return false;
+            for (int i = 0; i < s_active.Count; i++)
+            {
+                var effects = s_active[i].Effects;
+                for (int e = 0; e < effects.Count; e++)
+                {
+                    var effect = effects[e];
+                    if (effect.IsHide && !effect.Done && ReferenceEquals(effect.Node, node))
+                        return true;
+                }
+            }
+            if (node._animating) return false;
+            Conclude(node, node._exitThen);
+            return true;
+        }
+
+        // Cuts short the exit effect a hide is playing on a node shown again: in any transition, since the one that
+        // started it may have handed it over.
+        private static void SkipHideEffects(LayoutNode node)
+        {
+            for (int i = 0; i < s_active.Count; i++)
+            {
+                var effects = s_active[i].Effects;
+                for (int e = 0; e < effects.Count; e++)
+                {
+                    var effect = effects[e];
+                    if (!effect.IsHide || effect.Done || !ReferenceEquals(effect.Node, node)) continue;
+                    effect.Done = true;
+                    effect.Animator.Skip();
+                }
+            }
+        }
+
         // An effect may belong to a transition that has since handed it over, so every transition in flight is checked.
         private static void CompleteEffect(ViewTransition.Effect effect)
         {
@@ -1117,7 +1255,16 @@ namespace TimboJimbo.UI.Layout
                 if (effect.Done) continue;
                 effect.Done = true;
                 effect.Animator.Skip();
-                if (effect.IsExit && effect.Node != null && effect.Node._exiting)
+                if (effect.IsHide)
+                {
+                    if (effect.Node != null && effect.Node._hidden)
+                    {
+                        LayoutEngine.Conceal(effect.Node);
+                        if (effect.Node._exiting)
+                            Conclude(effect.Node, effect.Node._exitThen);
+                    }
+                }
+                else if (effect.IsExit && effect.Node != null && effect.Node._exiting)
                     Conclude(effect.Node, effect.Node._exitThen);
             }
             CompleteViewTransition(vt);
@@ -1131,7 +1278,7 @@ namespace TimboJimbo.UI.Layout
                 var flight = vt.Flights[i];
                 if (flight.Done || flight.Node == null || !flight.Node._lifted) { flight.Done = true; continue; }
                 flight.Elapsed = flight.Transition.Total;
-                WriteFlight(vt, flight, 1f, 1f);
+                WriteFlight(vt, flight, 1f);
                 flight.Done = true;
             }
             for (int i = 0; i < vt.Participants.Count; i++)
@@ -1258,6 +1405,13 @@ namespace TimboJimbo.UI.Layout
 #endif
 
         // ── Order ─────────────────────────────────────────────────────────────────
+
+        // A node's origin, when it has one and it is there to grow out of or shrink into.
+        private static RectTransform ActiveOrigin(LayoutNode node)
+        {
+            var origin = node.ViewTransitionOrigin;
+            return origin != null && origin.gameObject.activeInHierarchy ? origin : null;
+        }
 
         /// <summary>True when the node, or a node above it, is on its way out or hidden: either way it is not part of what is shown.</summary>
         private static bool IsLeaving(LayoutNode node)

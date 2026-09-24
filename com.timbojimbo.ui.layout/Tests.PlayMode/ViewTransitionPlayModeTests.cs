@@ -11,34 +11,6 @@ namespace TimboJimboTests.UI.Layout.PlayMode
     /// <summary>State a persisting object carries: proof that the object that lands is the one that left.</summary>
     public sealed class TestState : MonoBehaviour { }
 
-    /// <summary>A motion that goes straight, but keeps its contents in their old state until halfway and then jumps them to the new one.</summary>
-    [System.Serializable]
-    public sealed class SwapHalfwayMotion : ITransitionMotion
-    {
-        public MotionFrame Evaluate(in MotionInput input)
-        {
-            var frame = MotionFrame.Straight(input);
-            frame.Morph = input.Progress < 0.5f ? 0f : 1f;
-            return frame;
-        }
-    }
-
-    /// <summary>A motion that travels straight at half scale and half opacity until the move ends.</summary>
-    [System.Serializable]
-    public sealed class HalfLookMotion : ITransitionMotion
-    {
-        public MotionFrame Evaluate(in MotionInput input)
-        {
-            var frame = MotionFrame.Straight(input);
-            if (input.Progress < 1f)
-            {
-                frame.Scale = 0.5f;
-                frame.Opacity = 0.5f;
-            }
-            return frame;
-        }
-    }
-
     /// <summary>
     /// Play-mode tests of view transitions: movers, the groups (pairs, persisting pairs, exits, enters), the
     /// transition layer and its placeholders, carries, timing, types, scopes, the hand-over between transitions,
@@ -48,6 +20,8 @@ namespace TimboJimboTests.UI.Layout.PlayMode
     {
         private const float Tolerance = 1e-3f;
         private static readonly LayoutTransition Linear = LayoutTransition.Over(0.25f, EaseType.Linear);
+        // Holds everything in its old state until halfway, then jumps to the new one: nothing moves, fades or scales.
+        private static readonly LayoutMotion SwapHalfway = new() { Midpoint = 0.5f };
         private GameObject _canvas;
 
         [SetUp]
@@ -108,7 +82,7 @@ namespace TimboJimboTests.UI.Layout.PlayMode
         {
             float elapsed = flight.Elapsed - flight.Transition.Delay;
             float t = flight.Transition.Duration > 0f ? Mathf.Clamp01(elapsed / flight.Transition.Duration) : 1f;
-            return EaseUtility.Evaluate(t, flight.Transition.Ease);
+            return flight.Transition.Eased(t);
         }
 
         // The centre of a world rect, whose y is its top edge with y up.
@@ -435,6 +409,46 @@ namespace TimboJimboTests.UI.Layout.PlayMode
             Assert.That(group.blocksRaycasts, Is.True);
         }
 
+        [UnityTest]
+        public IEnumerator Hide_WithAnAnimator_PlaysItsExitInPlace_AndAnExitAfterwardsLeavesWithoutAnother()
+        {
+            var root = Node(_canvas.transform, "Root", Sizing.Fixed(200f), Sizing.Fixed(200f));
+            root.Direction = LayoutDirection.TopToBottom;
+            var a = Node(root.transform, "A", Sizing.Fixed(50f), Sizing.Fixed(20f));
+            var b = Node(root.transform, "B", Sizing.Fixed(50f), Sizing.Fixed(20f));
+            var animator = a.gameObject.AddComponent<TestAnimator>();
+            yield return null;
+
+            var vt = LayoutSystem.StartViewTransition(() => LayoutSystem.Hide(a), Linear);
+            Assert.That(animator.Exits, Is.EqualTo(1), "its exit plays, in its place");
+            Assert.That(animator.LastTransition, Is.SameAs(vt));
+            Assert.That(b.IsTransitioning, Is.False, "nothing closes up");
+            yield return Wait(0.4f);
+            Assert.That(vt.IsFinished, Is.False, "the transition waits for it");
+            animator.Complete();
+            Assert.That(vt.IsFinished, Is.True);
+            Assert.That(a.gameObject.activeSelf, Is.True, "still there");
+            Assert.That(a.GetComponent<CanvasGroup>().alpha, Is.EqualTo(0f).Within(Tolerance), "resting unseen");
+
+            vt = LayoutSystem.StartViewTransition(() => LayoutSystem.Exit(a), Linear);
+            Assert.That(animator.Exits, Is.EqualTo(1), "taken out, it plays no second exit");
+            Assert.That(a.gameObject.activeSelf, Is.False, "it has gone from view already, so it leaves at once");
+            Assert.That(b.IsTransitioning, Is.True, "and the rest closes up");
+            yield return Finish(vt);
+
+            // Taken out while its hide still plays (the hide's transition handed over), it leaves when that ends.
+            var c = Node(root.transform, "C", Sizing.Fixed(50f), Sizing.Fixed(20f));
+            var cAnimator = c.gameObject.AddComponent<TestAnimator>();
+            yield return null;
+            LayoutSystem.StartViewTransition(() => LayoutSystem.Hide(c), Linear);
+            vt = LayoutSystem.StartViewTransition(() => LayoutSystem.Exit(c), Linear);
+            Assert.That(cAnimator.Exits, Is.EqualTo(1), "one exit, the hide's");
+            Assert.That(c.gameObject.activeSelf, Is.True, "still going");
+            cAnimator.Complete();
+            Assert.That(c.gameObject.activeSelf, Is.False, "gone when its hide ends");
+            yield return Finish(vt);
+        }
+
         // ── Pairs and the layer ────────────────────────────────────────────────
 
         [UnityTest]
@@ -553,6 +567,83 @@ namespace TimboJimboTests.UI.Layout.PlayMode
         }
 
         [UnityTest]
+        public IEnumerator Origin_ANodeWithoutAPairGrowsOutOfItsOrigin_AndGoesBackIntoIt()
+        {
+            var root = Node(_canvas.transform, "Root", Sizing.Fixed(400f), Sizing.Fixed(400f));
+            root.Direction = LayoutDirection.TopToBottom;
+            var button = Node(root.transform, "Button", Sizing.Fixed(100f), Sizing.Fixed(30f));
+            var popover = Node(root.transform, "Popover", Sizing.Fixed(200f), Sizing.Fixed(150f));
+            popover.ViewTransitionOrigin = Rect(button);
+            popover.gameObject.SetActive(false);
+            yield return null;
+            var buttonRect = World(button);
+
+            var vt = LayoutSystem.StartViewTransition(() => popover.gameObject.SetActive(true), Linear);
+            Assert.That(popover.transform.parent, Is.SameAs(Layer()), "entering, it flies, lifted like a pair's new half");
+            AssertSameRect(World(popover), buttonRect, "out of its origin's rect");
+            Assert.That(popover.GetComponent<CanvasGroup>().alpha, Is.EqualTo(0f).Within(Tolerance), "fading in");
+            yield return Finish(vt);
+            Assert.That(popover.transform.parent, Is.SameAs(root.transform), "back in its tree");
+            AssertSameRect(World(button), buttonRect, "the origin never moved");
+            var popoverRect = World(popover);
+
+            vt = LayoutSystem.StartViewTransition(() => LayoutSystem.Exit(popover), Linear);
+            Assert.That(popover.transform.parent, Is.SameAs(Layer()), "leaving, it flies again");
+            AssertSameRect(World(popover), popoverRect, "from where it is, back towards its origin");
+            yield return Finish(vt);
+            Assert.That(popover.gameObject.activeSelf, Is.False, "and leaves once it is back in it");
+            AssertSameRect(World(button), buttonRect, "the origin still where it was");
+        }
+
+        [UnityTest]
+        public IEnumerator Origin_GoingBackIntoItsOrigin_EasesForwardsInTime_KeepingPaceWithAPairGoingTheSameWay()
+        {
+            // A tile and the page that opens out of it, as a hub's are: the page grows out of the tile, and on the way
+            // back the page's surface flies into the tile's as a pair, the same route as the page's own.
+            var root = Node(_canvas.transform, "Root", Sizing.Fixed(400f), Sizing.Fixed(400f));
+            root.Direction = LayoutDirection.TopToBottom;
+            var tile = Node(root.transform, "Tile", Sizing.Fixed(100f), Sizing.Fixed(30f));
+            var tileSurface = Node(tile.transform, "Surface", Sizing.Fixed(100f), Sizing.Fixed(30f));
+            var page = Node(root.transform, "Page", Sizing.Fixed(200f), Sizing.Fixed(150f));
+            Node(page.transform, "Surface", Sizing.Fixed(200f), Sizing.Fixed(150f), "surface");
+            page.ViewTransitionOrigin = Rect(tile);
+            yield return null;
+            var pageRect = World(page);
+            var tileRect = World(tile);
+
+            var vt = LayoutSystem.StartViewTransition(() =>
+            {
+                LayoutSystem.Exit(page);
+                tileSurface.ViewTransitionName = "surface";
+            }, LayoutTransition.Over(1f, EaseType.OutCubic));
+            yield return Wait(0.3f);
+            var flight = vt.FlightOf(page);
+            float along = Eased(flight);
+            Assert.That(along, Is.GreaterThan(0.5f), "an ease-out is past halfway by then");
+            var expected = new Rect(Vector2.Lerp(pageRect.position, tileRect.position, along), Vector2.Lerp(pageRect.size, tileRect.size, along));
+            AssertSameRect(World(page), expected, "easing out, as the entrance it undoes did, not rewound into an ease-in");
+            AssertSameRect(World(tileSurface), World(page), "level with the pair flying the same way");
+
+            yield return Finish(vt);
+            Assert.That(page.gameObject.activeSelf, Is.False);
+            AssertSameRect(World(tileSurface), tileRect, "the pair landed in the tile");
+        }
+
+        [Test]
+        public void Mirrored_SwapsThePhasesAndTheMidpoint_SoAnArrivalThatFadesInDepartsFadingOut()
+        {
+            var drop = LayoutMotion.Drop.Curved(0.4f);
+            var mirrored = drop.Mirrored();
+            Assert.That(mirrored.Midpoint, Is.EqualTo(1f), "the arrival took the whole duration, so the departure does");
+            Assert.That(mirrored.Depart.Move && mirrored.Depart.Fade && mirrored.Depart.Ease == EaseType.OutCubic, Is.True, "the arrival, departing on its own ease");
+            Assert.That(mirrored.Arrive.Move || mirrored.Arrive.Fade, Is.False);
+            Assert.That(mirrored.Curvature, Is.EqualTo(0.4f));
+            var frame = mirrored.Evaluate(Vector2.zero, new Vector2(100f, 0f), Vector2.one, Vector2.one, 0.5f);
+            Assert.That(frame.Centre.x, Is.EqualTo(87.5f).Within(Tolerance), "OutCubic at halfway: seven eighths of the way");
+            Assert.That(frame.Opacity, Is.EqualTo(0.125f).Within(Tolerance), "and faded out as far");
+        }
+
+        [UnityTest]
         public IEnumerator Pair_ANamedPartInsideANamedContainerFliesItsOwnStraightLine()
         {
             var (root, list, page) = ListAndPage();
@@ -590,6 +681,141 @@ namespace TimboJimboTests.UI.Layout.PlayMode
             Assert.That(pageTitle.transform.parent, Is.SameAs(body.transform));
             Assert.That(Rect(pageTitle).anchoredPosition, Is.EqualTo(new Vector2(50f, -50f)));
             AssertSameRect(World(pageTitle), titleEnd, "landed", 0.01f);
+        }
+
+        [UnityTest]
+        public IEnumerator Pair_APartLiftedOutOfAScaledContainerFliesFromItsScaledRect_AndLandsWithItsOwnScale()
+        {
+            var (_, list, page) = ListAndPage();
+            var group = Node(list.transform, "Group", Sizing.Fixed(100f), Sizing.Fixed(50f));
+            var oldTitle = Node(group.transform, "Title", Sizing.Fixed(40f), Sizing.Fixed(10f), "title");
+            Node(page.transform, "Title", Sizing.Fixed(80f), Sizing.Fixed(20f), "title");
+            yield return null;
+            // A game's own scale on the container, as a drag's pose would be.
+            group.transform.localScale = new Vector3(0.5f, 0.5f, 1f);
+            var titleStart = World(oldTitle);
+
+            var vt = LayoutSystem.StartViewTransition(() =>
+            {
+                LayoutSystem.Exit(list);
+                page.gameObject.SetActive(true);
+            }, Linear);
+            Assert.That(oldTitle.transform.parent, Is.SameAs(Layer()), "the old title flies");
+            AssertSameRect(World(oldTitle), titleStart, "from where it was shown, at its container's scale");
+            Assert.That(oldTitle.transform.localScale, Is.EqualTo(Vector3.one), "which is in its rect, not taken into its own scale");
+            yield return Finish(vt);
+            Assert.That(oldTitle.transform.parent, Is.SameAs(group.transform), "back in its container");
+            Assert.That(oldTitle.transform.localScale, Is.EqualTo(Vector3.one), "with its own scale, not the container's on top");
+        }
+
+        [UnityTest]
+        public IEnumerator Fit_HalvesScaledToFitKeepTheirOwnLayout_ScaledToTheRect_TheirNamedPartsRidingFromWhereTheyWere()
+        {
+            var (_, list, page) = ListAndPage();
+            // The same shape at two sizes, so a scale by the width fills the rect exactly.
+            var small = Node(list.transform, "Small", Sizing.Fixed(100f), Sizing.Fixed(20f), "wallet");
+            var smallDot = Node(small.transform, "Dot", Sizing.Fixed(10f), Sizing.Fixed(10f), "dot");
+            var big = Node(page.transform, "Big", Sizing.Fixed(200f), Sizing.Fixed(40f), "wallet");
+            big.Padding = new Vector4(20f, 0f, 5f, 0f);
+            var bigDot = Node(big.transform, "Dot", Sizing.Fixed(30f), Sizing.Fixed(30f), "dot");
+            small.ViewTransitionFit = ViewTransitionFit.Scale;
+            big.ViewTransitionFit = ViewTransitionFit.Scale;
+            yield return null;
+            var smallStart = World(small);
+            var dotStart = World(smallDot);
+
+            var vt = LayoutSystem.StartViewTransition(() =>
+            {
+                LayoutSystem.Exit(list);
+                page.gameObject.SetActive(true);
+            }, Linear);
+            Assert.That(Rect(big).rect.size, Is.EqualTo(new Vector2(200f, 40f)), "the new half keeps its own size");
+            AssertSameRect(World(big), smallStart, "scaled down onto the old half's rect");
+            AssertSameRect(World(bigDot), dotStart, "its named part starts where the old one's was, not scaled twice");
+
+            yield return Wait(0.1f);
+            Assert.That(Rect(big).rect.size, Is.EqualTo(new Vector2(200f, 40f)), "still its own size mid-flight");
+            Assert.That(Rect(small).rect.size, Is.EqualTo(new Vector2(100f, 20f)), "and the old half its own");
+            float scale = big.transform.localScale.x;
+            Assert.That(scale, Is.GreaterThan(0.5f).And.LessThan(1f), "growing towards its own size");
+            Assert.That(big.transform.localScale.y, Is.EqualTo(scale).Within(Tolerance), "uniformly");
+            AssertSameRect(World(small), World(big), "the two halves on one rect");
+
+            yield return Finish(vt);
+            Assert.That(big.transform.localScale, Is.EqualTo(Vector3.one), "the scale comes off when it lands");
+            Assert.That(Rect(big).rect.size, Is.EqualTo(new Vector2(200f, 40f)));
+        }
+
+        [UnityTest]
+        public IEnumerator Fit_HalvesStretchedToFitFillTheRectExactly_EachAxisOnItsOwn_TheirNamedPartsRidingFromWhereTheyWere()
+        {
+            var (_, list, page) = ListAndPage();
+            // Two shapes: a wide tile and a tall page, which no uniform scale takes one onto the other.
+            var tile = Node(list.transform, "Tile", Sizing.Fixed(100f), Sizing.Fixed(50f), "surface");
+            var tileDot = Node(tile.transform, "Dot", Sizing.Fixed(10f), Sizing.Fixed(10f), "dot");
+            var sheet = Node(page.transform, "Sheet", Sizing.Fixed(200f), Sizing.Fixed(300f), "surface");
+            sheet.Padding = new Vector4(20f, 0f, 40f, 0f);
+            var sheetDot = Node(sheet.transform, "Dot", Sizing.Fixed(30f), Sizing.Fixed(30f), "dot");
+            tile.ViewTransitionFit = ViewTransitionFit.Stretch;
+            sheet.ViewTransitionFit = ViewTransitionFit.Stretch;
+            yield return null;
+            var tileStart = World(tile);
+            var dotStart = World(tileDot);
+
+            var vt = LayoutSystem.StartViewTransition(() =>
+            {
+                LayoutSystem.Exit(list);
+                page.gameObject.SetActive(true);
+            }, Linear);
+            Assert.That(Rect(sheet).rect.size, Is.EqualTo(new Vector2(200f, 300f)), "the new half keeps its own size");
+            AssertSameRect(World(sheet), tileStart, "stretched onto the old half's rect exactly");
+            Assert.That(sheet.transform.localScale.x, Is.EqualTo(0.5f).Within(Tolerance), "half as wide");
+            Assert.That(sheet.transform.localScale.y, Is.EqualTo(50f / 300f).Within(Tolerance), "a sixth as tall");
+            AssertSameRect(World(sheetDot), dotStart, "its named part starts where the old one's was, not stretched twice");
+
+            yield return Wait(0.1f);
+            Assert.That(Rect(sheet).rect.size, Is.EqualTo(new Vector2(200f, 300f)), "still its own size mid-flight");
+            AssertSameRect(World(tile), World(sheet), "the two halves on one rect");
+            var flight = vt.FlightOf(sheet);
+            var expected = new Rect(Vector2.Lerp(tileStart.position, flight.LastDestination.position, Eased(flight)),
+                Vector2.Lerp(tileStart.size, flight.LastDestination.size, Eased(flight)));
+            AssertSameRect(World(sheet), expected, "filling the moving rect on both axes");
+
+            yield return Finish(vt);
+            Assert.That(sheet.transform.localScale, Is.EqualTo(Vector3.one), "the stretch comes off when it lands");
+            Assert.That(tile.transform.localScale, Is.EqualTo(Vector3.one));
+        }
+
+        [UnityTest]
+        public IEnumerator Pair_APartRidingAContainerLandsWithIt_WhateverItsOwnTiming()
+        {
+            var (_, list, page) = ListAndPage();
+            var card = Node(list.transform, "Card", Sizing.Fixed(100f), Sizing.Fixed(50f), "card");
+            Node(card.transform, "Title", Sizing.Fixed(40f), Sizing.Fixed(10f), "title");
+            var body = Node(page.transform, "Body", Sizing.Fixed(300f), Sizing.Fixed(200f), "card");
+            var pageTitle = Node(body.transform, "Title", Sizing.Fixed(80f), Sizing.Fixed(20f), "title");
+            // The container takes a second; the part inside it would take a fifth of one on its own.
+            body.Transition = LayoutTransition.Over(1f, EaseType.Linear);
+            pageTitle.Transition = LayoutTransition.Over(0.2f, EaseType.Linear);
+            yield return null;
+
+            var vt = LayoutSystem.StartViewTransition(() =>
+            {
+                LayoutSystem.Exit(list);
+                page.gameObject.SetActive(true);
+            }, Linear);
+            yield return Wait(0.5f);
+            Assert.That(vt.FlightOf(body).Done, Is.False, "the container is still on its way");
+            Assert.That(vt.FlightOf(pageTitle).Done, Is.False, "so is the part riding it, past its own time");
+            var bodyNow = World(body);
+            var titleNow = World(pageTitle);
+
+            yield return Wait(0.1f);
+            Assert.That(World(pageTitle).center - titleNow.center, Is.Not.EqualTo(Vector2.zero), "still moving with the container");
+            Assert.That(World(body).center - bodyNow.center, Is.Not.EqualTo(Vector2.zero));
+
+            yield return Finish(vt);
+            Assert.That(pageTitle.transform.parent, Is.SameAs(body.transform), "home in its container");
         }
 
         [UnityTest]
@@ -979,23 +1205,66 @@ namespace TimboJimboTests.UI.Layout.PlayMode
         public void Path_CurvatureBendsAStraightLineIntoAnArcTowardsTheShorterAxisFirstCorner()
         {
             var from = Vector2.zero;
-            var to = new Vector2(100f, 40f);   // y is the shorter axis: the L's corner is (0, 40)
+            var to = new Vector2(100f, 80f);   // y is the shorter axis: the L's corner is (0, 80); 39 degrees off the x axis
 
-            var straight = new ArcMotion(0f);
-            AssertPoint(straight.PointAlongPath(from, to, 0.25f), 25f, 10f, "no curvature is the straight line, at an even pace");
+            AssertPoint(LayoutMotion.PointAlongPath(from, to, 0f, 0.25f), 25f, 20f, "no curvature is the straight line, at an even pace");
+            // At 1 the control point is at the corner.
+            AssertPoint(LayoutMotion.PointAlongPath(from, to, 1f, 0.25f), 6.25f, 35f, "setting off along the shorter axis");
+            AssertPoint(LayoutMotion.PointAlongPath(from, to, 1f, 0.5f), 25f, 60f, "bowed towards the corner");
+            AssertPoint(LayoutMotion.PointAlongPath(from, to, 1f, 1f), 100f, 80f, "and ending where the line does");
+            // At 0.5 it is halfway from the midpoint to the corner.
+            AssertPoint(LayoutMotion.PointAlongPath(from, to, 0.5f, 0.5f), 37.5f, 50f, "a gentler arc");
 
-            var arc = new ArcMotion(1f);   // the control point at the corner
-            AssertPoint(arc.PointAlongPath(from, to, 0.25f), 6.25f, 17.5f, "setting off along the shorter axis");
-            AssertPoint(arc.PointAlongPath(from, to, 0.5f), 25f, 30f, "bowed towards the corner");
-            AssertPoint(arc.PointAlongPath(from, to, 1f), 100f, 40f, "and ending where the line does");
+            // Close to an axis the curvature fades out: a level path stays straight, and 15 degrees off it bends half as much.
+            AssertPoint(LayoutMotion.PointAlongPath(from, new Vector2(100f, 0f), 1f, 0.5f), 50f, 0f, "level: straight");
+            var shallow = new Vector2(100f, 100f * Mathf.Tan(15f * Mathf.Deg2Rad));
+            var halfBent = LayoutMotion.PointAlongPath(from, shallow, 1f, 0.5f);
+            // Curvature 0.5 at 15 degrees: control halfway from the midpoint (50, y/2) to the corner (0, y).
+            AssertPoint(halfBent, 37.5f, shallow.y * 0.625f, "15 degrees: half the curvature");
 
-            var half = new ArcMotion(0.5f);  // the control point halfway from the midpoint to the corner
-            AssertPoint(half.PointAlongPath(from, to, 0.5f), 37.5f, 25f, "a gentler arc");
+            // Close to the diagonal the shorter axis turns on a unit: an end that drifts across it would flip the bend
+            // to the other side, so a flight decides it once and keeps it.
+            var steep = new Vector2(100f, 101f);   // across is shorter: bends through (100, 0)
+            var flat = new Vector2(101f, 100f);    // down is shorter: bends through (0, 100)
+            bool acrossFirst = LayoutMotion.AcrossFirst(from, steep);
+            Assert.That(acrossFirst, Is.True);
+            AssertPoint(LayoutMotion.PointAlongPath(from, steep, 1f, 0.5f, acrossFirst), 75f, 25.25f, "bending across first");
+            AssertPoint(LayoutMotion.PointAlongPath(from, flat, 1f, 0.5f, acrossFirst), 75.75f, 25f, "kept as the end drifts past the diagonal");
+            AssertPoint(LayoutMotion.PointAlongPath(from, flat, 1f, 0.5f), 25.25f, 75f, "where deciding afresh would have jumped to");
 
             var transition = LayoutTransition.Over(1f).Curved(0.5f);
-            Assert.That(transition.Motion, Is.InstanceOf<ArcMotion>(), "Curved is an arc motion");
-            Assert.That(transition.After(0.2f).Motion, Is.SameAs(transition.Motion), "After keeps the motion");
-            Assert.That(LayoutTransition.Over(1f).Curved(0f).Motion, Is.Null, "no curvature is no motion: a straight line");
+            Assert.That(transition.Motion?.Curvature, Is.EqualTo(0.5f), "Curved bends the motion");
+            Assert.That(transition.After(0.2f).Motion?.Curvature, Is.EqualTo(0.5f), "After keeps the motion");
+            Assert.That(LayoutTransition.Over(1f).Curved(0f).Motion?.Curvature, Is.EqualTo(0f), "no curvature: a straight line");
+        }
+
+        [Test]
+        public void Motion_PhasesShareThePath_AOnePhaseMoveCoversIt_AndATeleportJumps()
+        {
+            var from = Vector2.zero;
+            var to = new Vector2(100f, 0f);
+            var size = new Vector2(10f, 10f);
+            MotionFrame At(LayoutMotion m, float p) => m.Evaluate(from, to, size, size, p);
+
+            // Both phases move: half the path each, wherever the midpoint is.
+            var both = new LayoutMotion { Midpoint = 0.25f, Depart = new MotionPhase(true, false, false, EaseType.Linear), Arrive = new MotionPhase(true, false, false, EaseType.Linear) };
+            AssertPoint(At(both, 0.25f).Centre, 50f, 0f, "halfway there a quarter of the way through");
+            AssertPoint(At(both, 0.625f).Centre, 75f, 0f, "the arrival covering the other half");
+
+            // Only the arrival moves: it covers the whole path, from the start, fading in.
+            var drop = LayoutMotion.Drop;
+            AssertPoint(At(drop, 0f).Centre, 0f, 0f, "a drop starts where it came from");
+            Assert.That(At(drop, 0f).Opacity, Is.EqualTo(0f).Within(Tolerance), "unseen");
+            Assert.That(At(drop, 0.5f).Centre.x, Is.GreaterThan(50f), "and falls into place on its ease");
+
+            // Neither moves: it holds, then jumps across in the gap, its contents morphing at once.
+            var pop = LayoutMotion.Pop;
+            AssertPoint(At(pop, 0.2f).Centre, 0f, 0f, "a teleport holds where it was");
+            Assert.That(At(pop, 0.2f).Morph, Is.EqualTo(0f));
+            Assert.That(At(pop, 0.5f).Scale, Is.EqualTo(Vector2.zero), "and is absent in the gap");
+            AssertPoint(At(pop, 0.8f).Centre, 100f, 0f, "then appears where it is going");
+            Assert.That(At(pop, 0.8f).Morph, Is.EqualTo(1f));
+            Assert.That(At(pop, 1f).Scale, Is.EqualTo(Vector2.one), "at full size once it lands");
         }
 
         [UnityTest]
@@ -1004,15 +1273,15 @@ namespace TimboJimboTests.UI.Layout.PlayMode
             var root = Node(_canvas.transform, "Root", Sizing.Fixed(300f), Sizing.Fixed(300f));
             var ownMotion = Node(root.transform, "Own motion", Sizing.Fixed(20f), Sizing.Fixed(20f));
             var ownTiming = Node(root.transform, "Own timing", Sizing.Fixed(20f), Sizing.Fixed(20f));
-            ownMotion.Motion = new StraightMotion();
-            ownTiming.Transition = LayoutTransition.Over(2f, EaseType.Linear);
+            ownMotion.Motion = LayoutMotion.Slide(EaseType.Linear);
+            ownTiming.Transition = new LayoutTransition { Duration = 2f };
             yield return null;
 
             var vt = LayoutSystem.StartViewTransition(() => root.Padding = Insets.Of(left: 100f, top: 40f),
                 LayoutTransition.Over(1f, EaseType.Linear).Curved(1f));
-            Assert.That(ownMotion._animTransition.Motion, Is.InstanceOf<StraightMotion>(), "a node's own motion replaces the transition's");
+            Assert.That(ownMotion._animTransition.Motion?.Curvature, Is.EqualTo(0f), "a node's own motion replaces the transition's");
             Assert.That(ownMotion._animTransition.Duration, Is.EqualTo(1f), "at the transition's pace");
-            Assert.That(ownTiming._animTransition.Motion, Is.InstanceOf<ArcMotion>(), "a node with only its own timing keeps the transition's motion");
+            Assert.That(ownTiming._animTransition.Motion?.Curvature, Is.EqualTo(1f), "a node with only its own timing keeps the transition's motion");
             Assert.That(ownTiming._animTransition.Duration, Is.EqualTo(2f), "at its own pace");
             Assert.That(ownTiming.Transition?.Motion, Is.Null, "a node's timing never carries a motion");
             yield return Finish(vt);
@@ -1030,14 +1299,14 @@ namespace TimboJimboTests.UI.Layout.PlayMode
             LayoutSystem.AdjustTransition = (node, t) =>
             {
                 t.Duration *= 2f;
-                return t.With(new StraightMotion());
+                return t.With(LayoutMotion.Slide());
             };
             var vt = LayoutSystem.StartViewTransition(() => root.Padding = Insets.Of(left: 100f, top: 40f),
                 LayoutTransition.Over(1f, EaseType.Linear).Curved(1f));
             Assert.That(plain._animTransition.Duration, Is.EqualTo(2f), "the call's timing, adjusted");
             Assert.That(authored._animTransition.Duration, Is.EqualTo(1f), "a node's own timing, adjusted too");
-            Assert.That(plain._animTransition.Motion, Is.InstanceOf<StraightMotion>());
-            Assert.That(authored._animTransition.Motion, Is.InstanceOf<StraightMotion>(), "whoever authored the motion");
+            Assert.That(plain._animTransition.Motion?.Curvature, Is.EqualTo(0f));
+            Assert.That(authored._animTransition.Motion?.Curvature, Is.EqualTo(0f), "whoever authored the motion");
             LayoutSystem.AdjustTransition = null;
             yield return Finish(vt);
         }
@@ -1092,7 +1361,7 @@ namespace TimboJimboTests.UI.Layout.PlayMode
             {
                 LayoutSystem.Exit(list);
                 page.gameObject.SetActive(true);
-            }, LayoutTransition.Over(1f, EaseType.Linear).With(new SwapHalfwayMotion()));
+            }, LayoutTransition.Over(1f, EaseType.Linear).With(SwapHalfway));
             yield return Wait(0.2f);
             Assert.That(card.GetComponent<CanvasGroup>().alpha, Is.EqualTo(1f).Within(Tolerance), "before the swap the old half shows fully");
             Assert.That(header.GetComponent<CanvasGroup>().alpha, Is.EqualTo(0f).Within(Tolerance), "and the new half not at all: no cross-fade");
@@ -1120,7 +1389,7 @@ namespace TimboJimboTests.UI.Layout.PlayMode
             {
                 LayoutSystem.Exit(list);
                 page.gameObject.SetActive(true);
-            }, LayoutTransition.Over(1f, EaseType.Linear).With(new SwapHalfwayMotion()));
+            }, LayoutTransition.Over(1f, EaseType.Linear).With(SwapHalfway));
             yield return Wait(0.2f);
             var offset = CentreOf(World(headerTitle)) - CentreOf(World(header));
             AssertPoint(offset, oldOffset.x, oldOffset.y, "before the morph the part keeps its old place in the container, wherever the container is");
@@ -1143,30 +1412,34 @@ namespace TimboJimboTests.UI.Layout.PlayMode
             {
                 root.Padding = Insets.Of(left: 100f, top: 40f);   // the box moves
                 box.Padding = Insets.Of(left: 30f, top: 60f);     // and the inner node moves inside it
-            }, LayoutTransition.Over(1f, EaseType.Linear).With(new SwapHalfwayMotion()));
+            }, LayoutTransition.Over(1f, EaseType.Linear).With(SwapHalfway));
             yield return Wait(0.2f);
-            Assert.That(Rect(box).anchoredPosition.x, Is.GreaterThan(0f), "the box is on its way");
-            AssertPoint(Rect(inner).anchoredPosition, 0f, 0f, "while the inner node keeps its old place in it");
+            AssertPoint(Rect(box).anchoredPosition, 0f, 0f, "the box holds where it was until it jumps");
+            AssertPoint(Rect(inner).anchoredPosition, 0f, 0f, "and the inner node keeps its old place in it");
             yield return Wait(0.5f);
-            AssertPoint(Rect(inner).anchoredPosition, 30f, -60f, "then, the box's contents morphed, its new one");
+            AssertPoint(Rect(box).anchoredPosition, 100f, -40f, "then the box is across");
+            AssertPoint(Rect(inner).anchoredPosition, 30f, -60f, "and, its contents morphed, the inner node in its new place");
             yield return Finish(vt);
         }
 
         [UnityTest]
-        public IEnumerator Motion_ACustomMotionScalesAroundTheCentreAndFades_ThenTheLookComesOff()
+        public IEnumerator Motion_APhaseScalesAroundTheCentreAndFades_ThenTheLookComesOff()
         {
             var root = Node(_canvas.transform, "Root", Sizing.Fixed(400f), Sizing.Fixed(400f));
             var b = Node(root.transform, "B", Sizing.Fixed(40f), Sizing.Fixed(40f));
             yield return null;
 
+            // All departure: it moves the whole way, shrinking and fading as it goes.
+            var departing = new LayoutMotion { Midpoint = 1f, Depart = new MotionPhase(true, true, true, EaseType.Linear) };
             var vt = LayoutSystem.StartViewTransition(() => root.Padding = Insets.Of(left: 100f, top: 40f),
-                LayoutTransition.Over(1f, EaseType.Linear).With(new HalfLookMotion()));
-            yield return Wait(0.1f);
-            Assert.That(Rect(b).localScale.x, Is.EqualTo(0.5f).Within(Tolerance), "scaled by the motion");
-            Assert.That(b.GetComponent<CanvasGroup>().alpha, Is.EqualTo(0.5f).Within(Tolerance), "and faded");
+                LayoutTransition.Over(1f).With(departing));
+            yield return Wait(0.3f);
+            float scale = Rect(b).localScale.x;
+            Assert.That(scale, Is.LessThan(1f).And.GreaterThan(0f), "scaled by the motion");
+            Assert.That(b.GetComponent<CanvasGroup>().alpha, Is.LessThan(scale), "and faded, the fade running ahead of the scale");
             var drawn = World(b);
             var laidOut = b.VisualRect;
-            Assert.That(drawn.width, Is.EqualTo(laidOut.width * 0.5f).Within(0.01f));
+            Assert.That(drawn.width, Is.EqualTo(laidOut.width * scale).Within(0.01f));
             // Scaled around its centre, which is where the layout rect's centre is.
             var expectedCentre = LayoutEngine.WorldRect(Rect(root)).position + new Vector2(laidOut.center.x, -laidOut.center.y);
             Assert.That(drawn.x + drawn.width * 0.5f, Is.EqualTo(expectedCentre.x).Within(0.01f), "around its centre (x)");

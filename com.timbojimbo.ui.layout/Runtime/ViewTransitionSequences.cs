@@ -92,10 +92,11 @@ namespace TimboJimbo.UI.Layout
             var player = _player = resolved.CreatePlayer(restoreValuesOnDispose: true);
             player.Completed += _ =>
             {
-                done();
-                // done may have started another effect on this object, which has replaced this player already.
+                // Put back before done: what done does next (conceal a hidden node, deactivate a leaving one, start
+                // another effect) then starts from the object as it was, and nothing undoes it afterwards.
                 if (_player == player)
                     Stop();
+                done();
             };
             player.Play();
         }

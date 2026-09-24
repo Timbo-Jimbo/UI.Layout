@@ -47,6 +47,8 @@ namespace TimboJimbo.UI.Layout
             /// unseen when the flight lands. One that stays in the page stays put and the new one grows out of it.
             /// </summary>
             public bool OldFlies;
+            /// <summary>For an enter or exit, the origin the node grows out of or shrinks back into, when it has one that is active.</summary>
+            public RectTransform Origin;
         }
 
         /// <summary>How a size-locked node (text) is sized on a flight: the new half takes its destination size at once, the old half keeps the size it has.</summary>
@@ -68,6 +70,19 @@ namespace TimboJimbo.UI.Layout
             public SizeRule Size;
             /// <summary>Lay the node's subtree out against its animated rect each tick: a kept object is arriving and has no final layout yet, so its content follows its rect; a pair's halves keep the layout they had, like snapshots.</summary>
             public bool LayoutEachTick;
+            /// <summary>Play the motion mirrored (<see cref="LayoutMotion.Mirrored"/>): a node leaving into its origin undoes its entrance.</summary>
+            public bool Reverse;
+            /// <summary>
+            /// For a node scaled to fit (<see cref="ViewTransitionFit.Scale"/> or <see cref="ViewTransitionFit.Stretch"/>):
+            /// the scale it has at the flight's start on each axis, its start size against its own. A part riding it
+            /// measures where it started in the node's own layout by it. One for a node that resizes.
+            /// </summary>
+            public Vector2 FitFrom = Vector2.one;
+            /// <summary>
+            /// Which way the flight's path bends (see <see cref="LayoutMotion.AcrossFirst"/>), decided at its first
+            /// frame and kept: its end is read live and may move, and a bend decided each frame could flip sides.
+            /// </summary>
+            public bool? AcrossFirst;
             public LayoutTransition Transition;
             public float Elapsed;
             public bool Done;
@@ -79,6 +94,8 @@ namespace TimboJimbo.UI.Layout
             public LayoutNode Node;
             public IViewTransitionAnimator Animator;
             public bool IsExit;
+            /// <summary>An exit effect played for <see cref="LayoutSystem.Hide"/>: the node rests unseen in its place when it ends.</summary>
+            public bool IsHide;
             public bool Done;
         }
 
@@ -136,7 +153,7 @@ namespace TimboJimbo.UI.Layout
         /// </summary>
         public LayoutTransition TransitionFor(LayoutNode node)
         {
-            var resolved = node == null ? Transition : (node.Transition ?? Transition).With(node.Motion ?? Transition.Motion);
+            var resolved = node == null ? Transition : (node.Transition ?? Transition).With(node.Motion ?? Transition.Motion ?? LayoutMotion.Slide());
             return LayoutSystem.AdjustTransition is { } adjust ? adjust(node, resolved) : resolved;
         }
 

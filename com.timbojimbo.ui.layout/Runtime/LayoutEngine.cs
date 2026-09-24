@@ -175,7 +175,7 @@ namespace TimboJimbo.UI.Layout
         internal static void ResetLook(LayoutNode n)
         {
             bool scaled = n._lookScaled;
-            n._lookScale = 1f;
+            n._lookScale = Vector2.one;
             n._lookOpacity = 1f;
             n._lookMorph = 1f;
             n._lookScaled = false;
@@ -200,11 +200,14 @@ namespace TimboJimbo.UI.Layout
         /// </summary>
         internal static Vector2 LookShift(LayoutNode n, Vector2 size)
         {
-            float s = n._lookScale;
-            if (Mathf.Approximately(s, 1f)) return Vector2.zero;
+            var s = n._lookScale;
+            if (IsUnscaled(s)) return Vector2.zero;
             var pivot = n.RectTransform.pivot;
-            return new Vector2((0.5f - pivot.x) * size.x, (0.5f - pivot.y) * size.y) * (1f - s);
+            return new Vector2((0.5f - pivot.x) * size.x * (1f - s.x), (0.5f - pivot.y) * size.y * (1f - s.y));
         }
+
+        /// <summary>True when a look's scale is none on both axes.</summary>
+        internal static bool IsUnscaled(Vector2 scale) => Mathf.Approximately(scale.x, 1f) && Mathf.Approximately(scale.y, 1f);
 
         /// <summary>
         /// Fades the node's CanvasGroup, adding one the first time the object needs it: in, from invisible up to the
@@ -373,9 +376,9 @@ namespace TimboJimbo.UI.Layout
                 n._committedBase = new Vector2(rect.x + rect.width * pivot.x, -(rect.y + rect.height * (1f - pivot.y)));
                 // A motion's scale is around the centre: the transform scales around its pivot, so shift to make up.
                 // The transform's scale is only touched while a motion has it, so a game's own scale is left alone.
-                if (!Mathf.Approximately(n._lookScale, 1f))
+                if (!IsUnscaled(n._lookScale))
                 {
-                    r.localScale = new Vector3(n._lookScale, n._lookScale, 1f);
+                    r.localScale = new Vector3(n._lookScale.x, n._lookScale.y, 1f);
                     n._lookScaled = true;
                 }
                 else if (n._lookScaled)

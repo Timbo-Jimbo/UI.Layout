@@ -40,16 +40,21 @@ namespace TimboJimbo.UI.Layout
         // The timing is zeroed whenever the flag is off, so timing with the flag off can only be data saved before
         // the flag existed, when a timing was the override: OnAfterDeserialize sets the flag for it.
         [SerializeField, HideInInspector] private bool _overrideTransition;
-        [Tooltip("How this node moves inside a view transition. Timing: Inherit uses the transition's own; Custom sets this node's, and a Custom with no duration and no delay snaps. Motion: Inherit uses the transition's own; anything else replaces it, whatever the timing.")]
+        [Tooltip("How this node moves inside a view transition. Timing: Inherit uses the transition's own; Custom sets this node's, and a Custom with no duration and no delay snaps. Motion: Inherit uses the transition's own; Custom sets this node's, whatever the timing.")]
         [SerializeField, NodeTransition] private LayoutTransition _transition;
-        // The node's own motion, kept beside the struct (which is saved by value) and drawn with it; null inherits.
-        [SerializeReference, HideInInspector] private ITransitionMotion _motion;
+        // The node's own motion, drawn with its timing: used when the flag is on, the transition's when it is off.
+        [SerializeField, HideInInspector] private bool _overrideMotion;
+        [SerializeField, HideInInspector] private LayoutMotion _ownMotion;
         [Tooltip("Like the web's view-transition-name: a node that appears in a view transition with the name another node had before it takes that node's place, the two flying and cross-fading. Empty means the node matches only itself.")]
         [SerializeField] private string _viewTransitionName;
         [Tooltip("Namespaces the view transition names of every node below this one (and its own): set it to the item's id when a prefab instance is bound to data, so a list of the same prefab has no duplicate names and a page bound to the same item pairs with that instance's parts. Empty means the names are used as they are.")]
         [SerializeField] private string _viewTransitionScope;
         [Tooltip("Keep this object across a view transition instead of cross-fading it with the node that carries its name in the new state: the two swap places, so this one flies into the new spot with its state (a running animation, a playing video) intact, and the new copy waits where this one was for the trip back. Flagging one copy is enough: the flag travels with the kept object. Moved to a new parent inside a view transition, a flagged node is carried there above everything, the same object throughout.")]
         [SerializeField] private bool _viewTransitionPersist;
+        [Tooltip("Where this node comes from and goes back to when it has no pair: entering, it grows out of this rect; leaving, it undoes that and shrinks back into it. For a popover opening out of its button, or a menu out of the row that opened it. Empty means it enters and leaves in place.")]
+        [SerializeField] private RectTransform _viewTransitionOrigin;
+        [Tooltip("How this node fills the rect it has while it flies in a view transition (a half of a named pair, or growing out of its origin). Resize: the rect changes size and the content keeps its layout, uncovered or clipped. Scale: it keeps its own layout and is scaled to the rect by its width, its content growing and shrinking with it: a morph. Stretch: the same, scaled on each axis on its own so it fills the rect exactly, its content stretched on the way. A named part inside it still flies its own way; a kept or carried object always resizes.")]
+        [SerializeField] private ViewTransitionFit _viewTransitionFit;
 
         // Engine scratch, valid from the owning root's Compute to its Commit. Engine space is the root's
         // top-left corner, y down; _pos is relative to the parent node's top-left, _absPos to the root's.
@@ -93,12 +98,13 @@ namespace TimboJimbo.UI.Layout
         internal float _fadeRestore;
         internal bool _fadePassThrough;
 
-        // How a motion has the node look right now: a scale around its centre, an opacity, and its morph, which a
+        // How a motion has the node look right now: a scale around its centre (on each axis, since a node stretched
+        // to fit its rect scales them apart), an opacity, and its morph, which a
         // half of a matched pair fades by and what rides inside it moves by. The scale is applied by every write
         // (see LayoutEngine.Write); the opacity goes through the fade's CanvasGroup, or one taken when first needed
         // and put back to _lookRestore when the move ends. _ridesOn is the travelling node above this one whose
         // morph this node's own move follows, if any.
-        internal float _lookScale = 1f;
+        internal Vector2 _lookScale = Vector2.one;
         internal float _lookOpacity = 1f;
         internal float _lookMorph = 1f;
         internal LayoutNode _ridesOn;
@@ -346,8 +352,8 @@ namespace TimboJimbo.UI.Layout
         }
 
         /// <summary>
-        /// The timing this node moves with inside a view transition (duration, ease and delay), in place of the one
-        /// the transition was started with, the way a CSS rule on <c>::view-transition-group(name)</c> overrides the
+        /// The timing this node moves with inside a view transition (duration and delay), in place of the one the
+        /// transition was started with, the way a CSS rule on <c>::view-transition-group(name)</c> overrides the
         /// default. Null (the default) means the transition's own; <see cref="LayoutTransition.Instant"/> makes the
         /// node snap while everything around it animates. How the node travels is <see cref="Motion"/>, which
         /// inherits on its own: this never carries a motion, and assigning a transition that does sets
@@ -356,27 +362,29 @@ namespace TimboJimbo.UI.Layout
         /// </summary>
         public LayoutTransition? Transition
         {
-            get => _overrideTransition ? _transition : null;
+            get => _overrideTransition ? _transition.With(null) : null;
             set
             {
                 _overrideTransition = value.HasValue;
-                _transition = value ?? default;
-                _transition.Motion = null;
+                _transition = (value ?? default).With(null);
                 if (value?.Motion is { } motion)
-                    _motion = motion;
+                    Motion = motion;
             }
         }
 
         /// <summary>
-        /// How this node travels inside a view transition, whatever its <see cref="Transition"/>: null (the default)
-        /// takes the transition's own motion, anything else replaces it (<see cref="StraightMotion"/> for a straight
-        /// line in a transition that bends or teleports). So a node can arc through a transition that teleports
-        /// everything else, at that transition's pace. Changing it never triggers a pass.
+        /// How this node travels, fades and scales inside a view transition, whatever its <see cref="Transition"/>:
+        /// null (the default) takes the transition's own motion, anything else replaces it. So a node can arc through
+        /// a transition that teleports everything else, at that transition's pace. Changing it never triggers a pass.
         /// </summary>
-        public ITransitionMotion Motion
+        public LayoutMotion? Motion
         {
-            get => _motion;
-            set => _motion = value;
+            get => _overrideMotion ? _ownMotion : null;
+            set
+            {
+                _overrideMotion = value.HasValue;
+                _ownMotion = value ?? default;
+            }
         }
 
         /// <summary>
@@ -420,6 +428,36 @@ namespace TimboJimbo.UI.Layout
         {
             get => _viewTransitionPersist;
             set => _viewTransitionPersist = value;
+        }
+
+        /// <summary>
+        /// Where this node comes from and goes back to when it has no pair, as though its other half were just this
+        /// rect: entering inside a view transition it grows out of the origin's rect into its own place, fading in,
+        /// and leaving it undoes that, shrinking back into the origin as the origin is by then: its motion mirrored,
+        /// easing forwards in time as the moves beside it do (see <see cref="LayoutMotion.Mirrored"/>). The origin
+        /// itself takes no part: it does not move, hide or need a name. For a popover opening out of its button, or a
+        /// menu out of the row that opened it (set it just before showing). A name pairing the node wins over it, and
+        /// an inactive origin is ignored; null (the default) enters and leaves in place.
+        /// </summary>
+        public RectTransform ViewTransitionOrigin
+        {
+            get => _viewTransitionOrigin;
+            set => _viewTransitionOrigin = value;
+        }
+
+        /// <summary>
+        /// How this node fills the rect it has while it flies in a view transition, as a half of a named pair or
+        /// growing out of its <see cref="ViewTransitionOrigin"/>: <see cref="Layout.ViewTransitionFit.Resize"/> (the
+        /// default) changes the rect's size and leaves the content's layout as it is;
+        /// <see cref="Layout.ViewTransitionFit.Scale"/> keeps the node's own layout and scales it to the rect, a morph
+        /// for two halves laid out alike at different sizes; <see cref="Layout.ViewTransitionFit.Stretch"/> scales it on
+        /// each axis on its own to fill the rect exactly, for halves of different shapes. The node's own; it is not
+        /// inherited.
+        /// </summary>
+        public ViewTransitionFit ViewTransitionFit
+        {
+            get => _viewTransitionFit;
+            set => _viewTransitionFit = value;
         }
 
         /// <summary>The name a view transition matches this node by: its name under the nearest scope, or null when it has no name.</summary>
@@ -504,16 +542,18 @@ namespace TimboJimbo.UI.Layout
         /// <summary>The in-flight move's frame from its transition's motion (engine space is y down, so a rect's own centre is its middle).</summary>
         internal MotionFrame CurrentFrame()
         {
-            // Inside a parent that travels too, the node goes from its old place in the parent to its new one as the
-            // parent's contents morph, not on its own clock; once the parent has arrived, its contents are morphed.
-            float eased = _ridesOn == null ? EasedProgress()
-                : _ridesOn._animating || _ridesOn._lifted ? _ridesOn._lookMorph
-                : 1f;
-            return _animTransition.Evaluate(new MotionInput(_animFrom.center, _animTo.center, _animFrom.size, _animTo.size, Progress(), eased));
+            // Inside a parent that travels too, the node goes straight from its old place in the parent to its new one
+            // as the parent's contents morph, not on its own clock; once the parent has arrived, its contents are morphed.
+            if (_ridesOn != null)
+            {
+                float morph = _ridesOn._animating || _ridesOn._lifted ? _ridesOn._lookMorph : 1f;
+                return MotionFrame.Straight(_animFrom.center, _animTo.center, _animFrom.size, _animTo.size, morph);
+            }
+            return _animTransition.Evaluate(_animFrom.center, _animTo.center, _animFrom.size, _animTo.size, Progress());
         }
 
-        /// <summary>The in-flight move's eased progress, 0 to 1: 0 through its delay, then eased over its duration.</summary>
-        internal float EasedProgress() => EaseUtility.Evaluate(Progress(), _animTransition.Ease);
+        /// <summary>The in-flight move's eased progress, 0 to 1: 0 through its delay, then through its motion's eases.</summary>
+        internal float EasedProgress() => _animTransition.Eased(Progress());
 
         /// <summary>The in-flight move's linear progress, 0 to 1: 0 through its delay, then straight over its duration.</summary>
         internal float Progress()

@@ -43,47 +43,40 @@ namespace TimboJimboEditor.UI.Layout
     }
 
     /// <summary>
-    /// Draws a node's transition in two parts that inherit separately. Timing: Inherit (the view transition's own)
-    /// on one line, or Custom and then its duration and ease, and its delay on a second line. Motion, on a line of
-    /// its own: Inherit (the view transition's own) or one of every <see cref="ITransitionMotion"/> type in the
-    /// project, with the chosen motion's fields below. The timing's choice is the hidden override flag stored next
-    /// to it, and the motion is the node's serialized reference beside it, null when it inherits.
+    /// Draws a node's transition in two parts that inherit separately, each Inherit (the view transition's own) or
+    /// Custom. Timing: its duration and delay on the same line. Motion, on a line of its own, with a preset menu and,
+    /// when Custom, its fields below: midpoint, gap and curvature, then the departure and the arrival. The choices
+    /// are the hidden override flags stored next to the timing and the node's own motion.
     /// </summary>
     [CustomPropertyDrawer(typeof(NodeTransitionAttribute))]
     internal sealed class NodeTransitionDrawer : PropertyDrawer
     {
         private const float Spacing = 4f;
         private const string OverrideField = "_overrideTransition";
-        private const string MotionField = "_motion";
+        private const string OverrideMotionField = "_overrideMotion";
+        private const string MotionField = "_ownMotion";
         private static readonly string[] s_modes = { "Inherit", "Custom" };
         private static readonly GUIContent s_duration = new("Dur", "Duration in seconds; with no delay either, the node snaps");
         private static readonly GUIContent s_delay = new("Delay", "Delay in seconds");
-        private static readonly GUIContent s_motion = new("Motion", "How the node travels, whatever its timing: Inherit takes the view transition's own motion; anything else replaces it");
-
-        private static Type[] s_motionTypes;
-        private static GUIContent[] s_motionNames;
+        private static readonly GUIContent s_motion = new("Motion", "How the node travels, fades and scales, whatever its timing: Inherit takes the view transition's own");
+        private static readonly GUIContent s_preset = new("Preset…", "Fill the motion from a named preset");
+        private static readonly string[] s_motionFields = { "Midpoint", "Gap", "Curvature", "Depart", "Arrive" };
 
         public override float GetPropertyHeight(SerializedProperty property, GUIContent label)
         {
-            var overrides = property.serializedObject.FindProperty(OverrideField);
-            var motion = property.serializedObject.FindProperty(MotionField);
+            var overrideMotion = property.serializedObject.FindProperty(OverrideMotionField);
             float line = EditorGUIUtility.singleLineHeight;
             float spacing = EditorGUIUtility.standardVerticalSpacing;
-            float height = line;
-            if (overrides != null && overrides.boolValue)
-                height += spacing + line;
-            if (motion != null)
-            {
-                height += spacing + line;
-                foreach (var child in Children(motion))
-                    height += EditorGUI.GetPropertyHeight(child, true) + spacing;
-            }
+            float height = line * 2f + spacing;
+            if (overrideMotion != null && overrideMotion.boolValue)
+                height += (line + spacing) * s_motionFields.Length;
             return height;
         }
 
         public override void OnGUI(Rect position, SerializedProperty property, GUIContent label)
         {
             var overrides = property.serializedObject.FindProperty(OverrideField);
+            var overrideMotion = property.serializedObject.FindProperty(OverrideMotionField);
             var motion = property.serializedObject.FindProperty(MotionField);
             float line = EditorGUIUtility.singleLineHeight;
             float spacing = EditorGUIUtility.standardVerticalSpacing;
@@ -92,108 +85,122 @@ namespace TimboJimboEditor.UI.Layout
             int indent = EditorGUI.indentLevel;
             EditorGUI.indentLevel = 0;
             float labelWidth = EditorGUIUtility.labelWidth;
-
-            // Timing.
             float modeWidth = Mathf.Min(72f, first.width * 0.3f);
-            var modeRect = new Rect(first.x, first.y, modeWidth, line);
-            EditorGUI.showMixedValue = overrides.hasMultipleDifferentValues;
-            EditorGUI.BeginChangeCheck();
-            int mode = EditorGUI.Popup(modeRect, overrides.boolValue ? 1 : 0, s_modes);
-            if (EditorGUI.EndChangeCheck())
-            {
-                overrides.boolValue = mode == 1;
-                // Inherit keeps no timing of its own, which is how saved data tells the two apart.
-                if (mode == 0)
-                {
-                    property.FindPropertyRelative("Duration").floatValue = 0f;
-                    property.FindPropertyRelative("Ease").enumValueIndex = 0;
-                    property.FindPropertyRelative("Delay").floatValue = 0f;
-                }
-            }
-            EditorGUI.showMixedValue = false;
 
-            float y = first.y;
+            // Timing: Inherit, or Custom with its duration and delay.
+            var modeRect = new Rect(first.x, first.y, modeWidth, line);
+            if (ModePopup(modeRect, overrides) && !overrides.boolValue)
+            {
+                // Inherit keeps no timing of its own, which is how saved data tells the two apart.
+                property.FindPropertyRelative("Duration").floatValue = 0f;
+                property.FindPropertyRelative("Delay").floatValue = 0f;
+            }
             if (overrides.boolValue)
             {
-                EditorGUIUtility.labelWidth = 44f;
+                EditorGUIUtility.labelWidth = 40f;
                 var rest = new Rect(modeRect.xMax + Spacing, first.y, Mathf.Max(0f, first.width - modeWidth - Spacing), line);
                 float half = (rest.width - Spacing) * 0.5f;
                 EditorGUI.PropertyField(new Rect(rest.x, rest.y, half, line), property.FindPropertyRelative("Duration"), s_duration);
-                EditorGUI.PropertyField(new Rect(rest.x + half + Spacing, rest.y, half, line), property.FindPropertyRelative("Ease"), GUIContent.none);
-                // The delay lines up under the first line's fields, after the mode.
-                y += line + spacing;
-                EditorGUI.PropertyField(new Rect(first.x, y, modeWidth + Spacing + half, line), property.FindPropertyRelative("Delay"), s_delay);
+                EditorGUI.PropertyField(new Rect(rest.x + half + Spacing, rest.y, half, line), property.FindPropertyRelative("Delay"), s_delay);
                 EditorGUIUtility.labelWidth = labelWidth;
             }
 
-            // Motion, then its own fields indented under it.
-            if (motion != null)
+            // Motion: Inherit, or Custom with a preset menu and its fields below.
+            float y = first.y + line + spacing;
+            EditorGUI.LabelField(new Rect(position.x, y, first.x - position.x, line), s_motion);
+            var motionMode = new Rect(first.x, y, modeWidth, line);
+            ModePopup(motionMode, overrideMotion);
+            if (overrideMotion.boolValue)
             {
-                y += line + spacing;
-                EditorGUIUtility.labelWidth = 52f;
-                MotionPopup(new Rect(first.x, y, first.width, line), motion);
-                EditorGUIUtility.labelWidth = labelWidth;
-                y += line + spacing;
-                foreach (var child in Children(motion))
+                var presetRect = new Rect(motionMode.xMax + Spacing, y, Mathf.Min(110f, first.width - modeWidth - Spacing), line);
+                if (EditorGUI.DropdownButton(presetRect, s_preset, FocusType.Passive))
                 {
-                    float height = EditorGUI.GetPropertyHeight(child, true);
-                    EditorGUI.PropertyField(new Rect(first.x, y, first.width, height), child, true);
-                    y += height + spacing;
+                    var menu = new GenericMenu();
+                    foreach (var (name, preset) in LayoutMotion.Presets)
+                    {
+                        var chosen = preset;
+                        menu.AddItem(new GUIContent(name), false, () =>
+                        {
+                            motion.serializedObject.Update();
+                            Write(motion, chosen);
+                            motion.serializedObject.ApplyModifiedProperties();
+                        });
+                    }
+                    menu.DropDown(presetRect);
                 }
+                EditorGUIUtility.labelWidth = 70f;
+                foreach (var field in s_motionFields)
+                {
+                    y += line + spacing;
+                    EditorGUI.PropertyField(new Rect(first.x, y, first.width, line), motion.FindPropertyRelative(field));
+                }
+                EditorGUIUtility.labelWidth = labelWidth;
             }
 
             EditorGUI.indentLevel = indent;
             EditorGUI.EndProperty();
         }
 
-        private static void MotionPopup(Rect rect, SerializedProperty motion)
+        // An Inherit/Custom popup over a flag; true when the user changed it.
+        private static bool ModePopup(Rect rect, SerializedProperty flag)
         {
-            EnsureMotionTypes();
-            var current = motion.managedReferenceValue?.GetType();
-            int index = current == null ? 0 : Array.IndexOf(s_motionTypes, current) + 1;
-            EditorGUI.showMixedValue = motion.hasMultipleDifferentValues;
+            EditorGUI.showMixedValue = flag.hasMultipleDifferentValues;
             EditorGUI.BeginChangeCheck();
-            int chosen = EditorGUI.Popup(rect, s_motion, Mathf.Max(0, index), s_motionNames);
-            if (EditorGUI.EndChangeCheck() && chosen != index)
-                motion.managedReferenceValue = chosen == 0 ? null : Activator.CreateInstance(s_motionTypes[chosen - 1]);
+            int mode = EditorGUI.Popup(rect, flag.boolValue ? 1 : 0, s_modes);
+            bool changed = EditorGUI.EndChangeCheck();
+            if (changed)
+                flag.boolValue = mode == 1;
             EditorGUI.showMixedValue = false;
+            return changed;
         }
 
-        // Every concrete, serializable motion type with a parameterless constructor, named without "Motion".
-        private static void EnsureMotionTypes()
+        private static void Write(SerializedProperty motion, LayoutMotion value)
         {
-            if (s_motionTypes != null) return;
-            var types = new List<Type>();
-            foreach (var type in TypeCache.GetTypesDerivedFrom<ITransitionMotion>())
-            {
-                if (type.IsAbstract || type.IsInterface || type.IsGenericTypeDefinition || !type.IsSerializable) continue;
-                if (typeof(UnityEngine.Object).IsAssignableFrom(type) || type.GetConstructor(Type.EmptyTypes) == null) continue;
-                types.Add(type);
-            }
-            types.Sort((a, b) => string.CompareOrdinal(a.Name, b.Name));
-            s_motionTypes = types.ToArray();
-            s_motionNames = new GUIContent[s_motionTypes.Length + 1];
-            s_motionNames[0] = new GUIContent("Inherit", "The view transition's own motion");
-            for (int i = 0; i < s_motionTypes.Length; i++)
-            {
-                var name = s_motionTypes[i].Name;
-                if (name.EndsWith("Motion") && name.Length > "Motion".Length)
-                    name = name.Substring(0, name.Length - "Motion".Length);
-                s_motionNames[i + 1] = new GUIContent(ObjectNames.NicifyVariableName(name), s_motionTypes[i].FullName);
-            }
+            motion.FindPropertyRelative("Midpoint").floatValue = value.Midpoint;
+            motion.FindPropertyRelative("Gap").floatValue = value.Gap;
+            motion.FindPropertyRelative("Curvature").floatValue = value.Curvature;
+            Write(motion.FindPropertyRelative("Depart"), value.Depart);
+            Write(motion.FindPropertyRelative("Arrive"), value.Arrive);
         }
 
-        private static IEnumerable<SerializedProperty> Children(SerializedProperty property)
+        private static void Write(SerializedProperty phase, MotionPhase value)
         {
-            if (property == null || property.managedReferenceValue == null) yield break;
-            var child = property.Copy();
-            var end = property.GetEndProperty();
-            if (!child.NextVisible(true)) yield break;
-            while (!SerializedProperty.EqualContents(child, end))
+            phase.FindPropertyRelative("Move").boolValue = value.Move;
+            phase.FindPropertyRelative("Fade").boolValue = value.Fade;
+            phase.FindPropertyRelative("Scale").boolValue = value.Scale;
+            phase.FindPropertyRelative("Ease").intValue = (int)value.Ease;
+        }
+    }
+
+    /// <summary>Draws a motion phase on one line: its three switches, then its ease.</summary>
+    [CustomPropertyDrawer(typeof(MotionPhase))]
+    internal sealed class MotionPhaseDrawer : PropertyDrawer
+    {
+        private static readonly string[] s_switches = { "Move", "Fade", "Scale" };
+
+        public override float GetPropertyHeight(SerializedProperty property, GUIContent label) => EditorGUIUtility.singleLineHeight;
+
+        public override void OnGUI(Rect position, SerializedProperty property, GUIContent label)
+        {
+            EditorGUI.BeginProperty(position, label, property);
+            position = EditorGUI.PrefixLabel(position, label);
+            int indent = EditorGUI.indentLevel;
+            EditorGUI.indentLevel = 0;
+            float x = position.x;
+            foreach (var name in s_switches)
             {
-                yield return child.Copy();
-                if (!child.NextVisible(false)) yield break;
+                var field = property.FindPropertyRelative(name);
+                var content = new GUIContent(name, field.tooltip);
+                float width = EditorStyles.toggle.CalcSize(content).x;
+                EditorGUI.BeginChangeCheck();
+                bool value = EditorGUI.ToggleLeft(new Rect(x, position.y, width, position.height), content, field.boolValue);
+                if (EditorGUI.EndChangeCheck())
+                    field.boolValue = value;
+                x += width + 6f;
             }
+            EditorGUI.PropertyField(new Rect(x, position.y, Mathf.Max(0f, position.xMax - x), position.height), property.FindPropertyRelative("Ease"), GUIContent.none);
+            EditorGUI.indentLevel = indent;
+            EditorGUI.EndProperty();
         }
     }
 }
