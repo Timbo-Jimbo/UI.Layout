@@ -67,6 +67,13 @@ namespace TimboJimbo.UI.Layout
 
         /// <summary>Placed against its layout root's rect.</summary>
         Root,
+
+        /// <summary>
+        /// Placed against another node's rect (<see cref="Floating.Element"/>) in the same layout tree, wherever it is
+        /// in the tree, and kept on it as drawn while the scroll containers it is inside scroll: a highlight behind the
+        /// selected tab, a tooltip on a row. Grow and percent sizes are of the element's whole size.
+        /// </summary>
+        Element,
     }
 
     /// <summary>

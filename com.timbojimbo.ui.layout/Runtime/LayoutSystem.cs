@@ -31,6 +31,15 @@ namespace TimboJimbo.UI.Layout
         // deceleration rate), or springing (back to an end, to a wheel's target, or where ScrollTo or ScrollOffset sent
         // it, on the node's own spring inside Animate); it is stepped with the springs, once a frame in play mode. A
         // LayoutScroller the system adds takes the pointer for it. In edit mode it is always at the start.
+        //
+        // A node floating against an element (Floating.Element, in the same tree) is sized and placed against the
+        // element's laid-out rect by the solver; its target then also takes in how the element is drawn apart from it:
+        // the Offsets of the element and of what the element is inside, and the scroll offsets of the containers the
+        // element is inside, bar those the node is inside too (and the other way round), and how far any of those that
+        // floats against an element in turn is moved on by that. It is the one target that takes scroll offsets in, so
+        // that a change of element springs it from where it is drawn inside Animate (and outside, puts it there at
+        // rest) as any change does, while scrolling moves it each frame, the offsets stepped that frame taken up before
+        // it is drawn.
 
         // What the system drives on a node's RectTransform, which the editor then shows as driven and does not save.
         private const DrivenTransformProperties Driven = DrivenTransformProperties.Anchors | DrivenTransformProperties.Pivot
@@ -54,11 +63,15 @@ namespace TimboJimbo.UI.Layout
         // ScrollTo was asked for something not laid out inside the container: said once.
         private static bool s_warnedScrollTo;
 
+        // Nodes whose Floating.Element is a mistake (in another tree, or circular), each said once.
+        private static readonly HashSet<LayoutNode> s_warnedElement = new();
+
         // A pass's scratch: the roots, outer before inner; one tree's nodes in pre-order, out of layout ones included;
-        // and its solver nodes, the first s_count of them in use.
+        // and its solver nodes, the first s_count of them in use, with the node each is (to find an element's).
         private static readonly List<NodeState> s_roots = new();
         private static readonly List<NodeState> s_visit = new();
         private static SolverNode[] s_solver = new SolverNode[64];
+        private static NodeState[] s_solved = new NodeState[64];
         private static int s_count;
         private static readonly Vector3[] s_corners = new Vector3[4];
 
@@ -82,10 +95,12 @@ namespace TimboJimbo.UI.Layout
                 state.Scroll.Queued = false;
             s_scrolled.Clear();
             s_warnedScrollTo = false;
+            s_warnedElement.Clear();
             s_roots.Clear();
             s_visit.Clear();
             s_count = 0;
             Array.Clear(s_solver, 0, s_solver.Length);
+            Array.Clear(s_solved, 0, s_solved.Length);
             // Nodes register and unregister themselves as they are enabled and disabled, so the set keeps itself; any
             // an earlier session left behind that are gone are dropped. The canvas hook lasts as long as the statics
             // do, so it stays.
@@ -104,9 +119,20 @@ namespace TimboJimbo.UI.Layout
         /// size, or Display) on its own <see cref="LayoutNode.Animation"/>'s spring, from where it is drawn and at the
         /// velocity it has, as SwiftUI's withAnimation. Nodes already moving that it leaves alone carry on; those it
         /// changes turn from where they are. <paramref name="types"/> say what kind of change it is. Called inside
-        /// another's update, the change is part of that one.
+        /// another's update, the change is part of that one. What it moves takes the pointer on its way (see
+        /// <see cref="Animate(Action, bool, string[])"/> for a change that does not).
         /// </summary>
-        public static LayoutTransition Animate(Action update, params string[] types)
+        public static LayoutTransition Animate(Action update, params string[] types) => Animate(update, true, types);
+
+        /// <summary>
+        /// Makes the change <paramref name="update"/> makes and animates it, as <see cref="Animate(Action, string[])"/>.
+        /// With <paramref name="interactive"/> false, every node it moves takes no pointer while it moves for it, and
+        /// nor does anything inside it (its CanvasGroup stops blocking raycasts), so the pointer goes to whatever is
+        /// under it; it takes the pointer again once it comes to rest, is taken over by an interactive change, or is
+        /// caught. UIKit's UIView.animate without .allowUserInteraction: a card closing cannot be pressed again on its
+        /// way. Called inside another's update, the change is part of that one, and interactive as that one is.
+        /// </summary>
+        public static LayoutTransition Animate(Action update, bool interactive, params string[] types)
         {
             if (update == null) throw new ArgumentNullException(nameof(update));
 
@@ -117,7 +143,7 @@ namespace TimboJimbo.UI.Layout
                 return s_current;
             }
 
-            var transition = new LayoutTransition(types);
+            var transition = new LayoutTransition(types, interactive);
 
             // Outside play mode nothing animates: the change goes where it goes at once, as any other does.
             if (!Application.isPlaying)
@@ -167,7 +193,8 @@ namespace TimboJimbo.UI.Layout
         }
 
         // Disabled or destroyed, a node is not drawn, so nothing waits for it: it lets go of the transitions it was
-        // moving for, and of its RectTransform. Enabled again, it is met afresh, as a node seen for the first time.
+        // moving for (which did not complete), and of its RectTransform. Enabled again, it is met afresh, as a node seen
+        // for the first time.
         internal static void Unregister(LayoutNode node)
         {
             if (s_states.TryGetValue(node, out var state))
@@ -178,6 +205,9 @@ namespace TimboJimbo.UI.Layout
                 Stop(state.Opacity);
                 Stop(state.Scale);
                 Disown(state);
+                // No longer sized by layout: its content is drawn at its rect again.
+                if (node.TryGetComponent(out ILayoutMeasurable content))
+                    content.Arrange(Unarranged);
                 // No longer shown or hidden by the system: drawn and clickable, as it would be without it.
                 if (state.Group != null)
                 {
@@ -205,6 +235,10 @@ namespace TimboJimbo.UI.Layout
         // Something about the node changed; outside play mode, the editor should draw it again.
         internal static void Changed(LayoutNode node)
         {
+            // Changed inside Animate, a caught node is let go of: the change moves it on from where it was stopped (a
+            // drag letting go puts its Offset back, and its size and opacity set off again with it).
+            if (s_current != null && s_states.TryGetValue(node, out var state))
+                state.Held = false;
 #if UNITY_EDITOR
             // In play mode the next frame lays it out anyway. In edit mode the player loop, and with it the canvas
             // update this lays out in, only runs when something asks for it.
@@ -230,9 +264,19 @@ namespace TimboJimbo.UI.Layout
             return space.TransformVector(new Vector3(velocity.x, -velocity.y, 0f));
         }
 
+        // How fast its width and height are growing, from its parent's layout units into world units a second.
+        internal static Vector2 SizeVelocityOf(LayoutNode node)
+        {
+            if (!s_states.TryGetValue(node, out var state) || !state.Size.Moving) return Vector2.zero;
+            var space = SpaceOf(state);
+            return space != null ? Vector2.Scale(state.Size.Velocity, UnitOf(space)) : Vector2.zero;
+        }
+
         // Sets its position moving at `velocity` (world units a second) towards where layout puts it, on its own
-        // spring; not for any transition, and with no sideways kick. An Animate after it sets off at that velocity.
-        internal static void Fling(LayoutNode node, Vector3 velocity)
+        // spring; not for any transition, and with no sideways kick. Given a `sizeVelocity` (how fast its width and
+        // height are growing, world units a second), its size is set moving at it in the same way; left at zero, its
+        // size is left as it is. An Animate after it sets off at those velocities.
+        internal static void Fling(LayoutNode node, Vector3 velocity, Vector2 sizeVelocity)
         {
             if (!Application.isPlaying || !s_states.TryGetValue(node, out var state)) return;
 
@@ -250,22 +294,79 @@ namespace TimboJimbo.UI.Layout
             spring.Velocity = new Vector2(local.x, -local.y);
             spring.Delay = 0f;
             Hold(spring, null);
+
+            if (sizeVelocity != Vector2.zero)
+            {
+                var size = state.Size;
+                var unit = UnitOf(space);
+                Spring.Parameters(state.Node.Animation, out size.Omega, out size.Zeta);
+                size.Velocity = new Vector2(unit.x > 0f ? sizeVelocity.x / unit.x : 0f, unit.y > 0f ? sizeVelocity.y / unit.y : 0f);
+                size.Delay = 0f;
+                Hold(size, null);
+            }
             FlushIfIdle();
         }
 
-        // Stops its position where it is drawn: its Offset moves by how far that is from where it was going (y up),
-        // so its target is where it is, and the next pass reads that back as no change. Its size, opacity and scale
-        // carry on.
+        // Stops it where it is drawn. Its position stops by its Offset: that moves by how far it is drawn from where it
+        // was going (y up), so its target is where it is, and the next pass reads that back as no change. Its size and
+        // opacity stop too, and are held where they stopped (below); its scale carries on. What they were moving for
+        // is let go of on its way, and does not complete. Returns whether any of them was moving.
         internal static bool Catch(LayoutNode node)
         {
-            if (!s_states.TryGetValue(node, out var state) || state.Parent == null || !state.Position.Moving) return false;
-            var spring = state.Position;
-            var off = spring.Value - spring.Target;
+            if (!s_states.TryGetValue(node, out var state) || state.Parent == null) return false;
+            var position = state.Position;
+            bool caught = position.Moving;
+            if (caught)
+            {
+                var off = position.Value - position.Target;
+                position.Target = position.Value;
+                Stop(position);
+                node.Offset += new Vector2(off.x, -off.y);
+            }
+            // Size and opacity have no Offset to take up where they were stopped: they are held there instead (Place
+            // leaves them) until the node is moved on. Caught again while held, what layout gave it is still what it was.
+            if (state.Size.Moving || state.Opacity.Moving)
+            {
+                if (!state.Held)
+                {
+                    state.Held = true;
+                    state.HeldSize = state.Size.Target;
+                    state.HeldOpacity = state.Opacity.Target;
+                }
+                StopWhereDrawn(state.Size);
+                StopWhereDrawn(state.Opacity);
+                StopInside(state);
+                caught = true;
+            }
+            if (caught)
+                FlushIfIdle();
+            return caught;
+        }
+
+        // Stops everything inside a node being held where it is drawn, as pausing an animation pauses all it moves: laid
+        // out for the size the node was going to, it would otherwise carry on there, out of the node held short of it.
+        // Place leaves it there (PassFrozen) until the node is let go of, when it moves on with it.
+        private static void StopInside(NodeState state)
+        {
+            var transform = state.RectTransform;
+            for (int i = 0; i < transform.childCount; i++)
+            {
+                if (!transform.GetChild(i).TryGetComponent(out LayoutNode child) || !child.isActiveAndEnabled
+                    || !s_states.TryGetValue(child, out var childState))
+                    continue;
+                StopWhereDrawn(childState.Position);
+                StopWhereDrawn(childState.Size);
+                StopWhereDrawn(childState.Opacity);
+                StopInside(childState);
+            }
+        }
+
+        // Stops a moving spring where it is, which is now where it goes.
+        private static void StopWhereDrawn(Spring spring)
+        {
+            if (!spring.Moving) return;
             spring.Target = spring.Value;
             Stop(spring);
-            node.Offset += new Vector2(off.x, -off.y);
-            FlushIfIdle();
-            return true;
         }
 
         // Its scroll offset as drawn (0 for a node that does not scroll, and outside play mode).
@@ -325,7 +426,7 @@ namespace TimboJimbo.UI.Layout
             RequestScroll(scroll, ScrollRequest.To, Vector2.zero, descendant, anchor);
         }
 
-        // Puts everything the transition is moving where it is going, and finishes it.
+        // Puts everything the transition is moving where it is going, as if it had got there, and finishes it.
         internal static void Skip(LayoutTransition transition)
         {
             if (transition == null || transition.IsFinished) return;
@@ -337,7 +438,7 @@ namespace TimboJimbo.UI.Layout
                 StopIfHeld(state.Scale, transition);
                 var scroll = state.Scroll;
                 if (scroll != null && scroll.Offset.Transition == transition)
-                    StopScrollAt(scroll, scroll.Offset.Target);
+                    StopScrollAt(scroll, scroll.Offset.Target, arrived: true);
             }
             transition.Finish();
         }
@@ -345,7 +446,7 @@ namespace TimboJimbo.UI.Layout
         private static void StopIfHeld(Spring spring, LayoutTransition transition)
         {
             if (spring.Transition == transition)
-                Stop(spring);
+                Stop(spring, arrived: true);
         }
 
         // ── The frame ────────────────────────────────────────────────────────────
@@ -390,7 +491,9 @@ namespace TimboJimbo.UI.Layout
                 for (int r = 0; r < s_roots.Count; r++)
                 {
                     LayOut(s_roots[r], null);
-                    // Pre-order: a scroll container's offset is stepped before its children are drawn by it.
+                    // The whole tree is stepped before any of it is drawn: a scroll container's offset before its
+                    // children are drawn by it, and every offset before a node floating against an element takes up
+                    // those the element is drawn by, wherever they are in the tree.
                     for (int i = 0; i < s_visit.Count; i++)
                     {
                         var state = s_visit[i];
@@ -400,6 +503,11 @@ namespace TimboJimbo.UI.Layout
                         Advance(state.Scale, playing, step, dt);
                         if (state.Scroll != null && state.Scroll.Axis != ScrollAxis.None)
                             StepScroll(state, playing, step, dt);
+                    }
+                    for (int i = 0; i < s_visit.Count; i++)
+                    {
+                        var state = s_visit[i];
+                        FollowElement(state);
                         Write(state);
                     }
                 }
@@ -455,7 +563,12 @@ namespace TimboJimbo.UI.Layout
             s_count = 0;
             Visit(root, null, true, -1);
             if (s_count > 0)
+            {
+                bool attached = FindElements(root);
                 LayoutSolver.Solve(s_solver, s_count, root.RectTransform.rect.size);
+                if (attached)
+                    WarnCircular();
+            }
             for (int i = 0; i < s_visit.Count; i++)
                 Place(s_visit[i], transition);
             for (int i = 0; i < s_visit.Count; i++)
@@ -488,7 +601,10 @@ namespace TimboJimbo.UI.Layout
             {
                 index = s_count++;
                 if (index == s_solver.Length)
+                {
                     Array.Resize(ref s_solver, index * 2);
+                    Array.Resize(ref s_solved, index * 2);
+                }
                 node.TryGetComponent(out ILayoutMeasurable content);
                 s_solver[index] = new SolverNode
                 {
@@ -504,9 +620,11 @@ namespace TimboJimbo.UI.Layout
                     AlignY = node.ChildAlignY,
                     AspectRatio = node.AspectRatio,
                     Floating = node.Floating,
+                    Element = -1,
                     Scroll = node.Scroll,
                     Content = content,
                 };
+                s_solved[index] = state;
             }
             state.PassIndex = index;
             s_visit.Add(state);
@@ -530,6 +648,68 @@ namespace TimboJimbo.UI.Layout
             return index;
         }
 
+        // Gives each node of the tree just visited that floats against an element the element's index there, for the
+        // solver. One whose element is not laid out in this tree (none, disabled or inactive, Display None or under a
+        // node that is, or in another tree) is attached to its parent instead, as the solver attaches one whose element
+        // it cannot place before it; another tree is a mistake, said once for the node (the rest are states a node
+        // passes through). Returns whether any has an element.
+        private static bool FindElements(NodeState root)
+        {
+            bool any = false;
+            for (int i = 1; i < s_count; i++)
+            {
+                ref var solver = ref s_solver[i];
+                if (solver.Floating.AttachTo != FloatingAttach.Element) continue;
+                var element = solver.Floating.Element;
+                if (element != null && s_states.TryGetValue(element, out var state))
+                {
+                    // Laid out in this pass, unless its index is -1 or another tree's.
+                    int index = state.PassIndex;
+                    if (index >= 0 && index < s_count && s_solved[index] == state)
+                    {
+                        solver.Element = index;
+                        any = true;
+                        continue;
+                    }
+                    var node = s_solved[i].Node;
+                    if (element.Display != DisplayMode.None && !s_warnedElement.Contains(node) && RootOf(element) != root.Node)
+                        WarnElement(node, $"({element.name}) is in another layout tree");
+                }
+                solver.Floating.AttachTo = FloatingAttach.Parent;
+            }
+            return any;
+        }
+
+        // Says once for each node the solver attached to its parent because it could not place its element before it.
+        private static void WarnCircular()
+        {
+            for (int i = 1; i < s_count; i++)
+            {
+                ref var solver = ref s_solver[i];
+                if (solver.Element < 0 || solver.Floating.AttachTo == FloatingAttach.Element) continue;
+                var node = s_solved[i].Node;
+                if (s_warnedElement.Contains(node)) continue;
+                var element = s_solved[solver.Element].Node;
+                WarnElement(node, element == node ? "is itself"
+                    : element.transform.IsChildOf(node.transform) ? $"({element.name}) is inside it"
+                    : $"({element.name}) cannot be placed before it, the elements they float against going round in a circle");
+            }
+        }
+
+        private static void WarnElement(LayoutNode node, string why)
+        {
+            s_warnedElement.Add(node);
+            Debug.LogWarning($"{node.name}.Floating.Element {why}, so {node.name} is placed against its parent instead. (Said once for it.)", node);
+        }
+
+        // The root of the layout tree a node is in.
+        private static LayoutNode RootOf(LayoutNode node)
+        {
+            while (!IsRoot(node))
+                node = node.transform.parent.GetComponent<LayoutNode>();
+            return node;
+        }
+
         // Gives a node its targets from the solved layout: its centre (moved by its Offset, y up) and size where it is
         // laid out, kept where they were when it has left layout; its opacity 1 when Visible and 0 otherwise; its
         // scale 1. Parents come before their children.
@@ -538,6 +718,8 @@ namespace TimboJimbo.UI.Layout
             var node = state.Node;
             var parent = state.PassParent;
             var opacity = new Vector2(node.Display == DisplayMode.Visible ? 1f : 0f, 0f);
+            // Inside a held node it stays where it was stopped with it; what was not drawn has nothing to hold.
+            state.PassFrozen = parent != null && (parent.Held || parent.PassFrozen) && !state.PassUnseen;
 
             // Met for the first time, it starts where it goes; out of layout, where its rect is. Inside Animate it
             // fades in, unless what it is inside is not drawn yet either (only the topmost of what appears fades, what
@@ -573,42 +755,93 @@ namespace TimboJimbo.UI.Layout
                 {
                     Retarget(state, state.Opacity, opacity, null);
                 }
+                Arrange(state);
                 return;
             }
 
             if (parent != state.Parent)
                 Reparent(state, parent);
 
-            if (parent != null && state.PassIndex >= 0)
+            // Inside a held node, laid out for the size it was going to: it keeps where it was stopped with it until the
+            // node is let go of (parents are placed first, so that is seen before it is).
+            if (state.PassFrozen)
             {
-                TargetOf(state, out var centre, out var size);
-                // What is not drawn has nowhere it is seen to move from: what it is given, it goes to at once (a page
-                // coming back after its layout changed while it was gone appears where it now goes, and fades in).
-                var move = state.PassUnseen ? null : transition;
-                if (centre != state.Position.Target)
-                    Retarget(state, state.Position, centre, move);
-                if (size != state.Size.Target)
-                    Retarget(state, state.Size, size, move);
+                Arrange(state);
+                return;
             }
-            if (opacity != state.Opacity.Target)
-                Retarget(state, state.Opacity, opacity, transition);
+
+            {
+                bool laidOut = parent != null && state.PassIndex >= 0;
+                Vector2 centre = default, size = default;
+                if (laidOut)
+                    TargetOf(state, out centre, out size);
+                // Caught, its size and opacity stay where they were stopped while layout still gives it what it did then;
+                // given something new, it is let go of, and goes there as any node does. Not drawn (something above it left
+                // layout and came back), it has nothing to hold, and goes where it is given at once.
+                if (state.Held && (state.PassUnseen || (laidOut && size != state.HeldSize) || opacity != state.HeldOpacity))
+                    state.Held = false;
+
+                if (laidOut)
+                {
+                    // What is not drawn has nowhere it is seen to move from: what it is given, it goes to at once (a page
+                    // coming back after its layout changed while it was gone appears where it now goes, and fades in).
+                    var move = state.PassUnseen ? null : transition;
+                    if (centre != state.Position.Target)
+                        Retarget(state, state.Position, centre, move);
+                    if (!state.Held && size != state.Size.Target)
+                        Retarget(state, state.Size, size, move);
+                }
+                if (!state.Held && opacity != state.Opacity.Target)
+                    Retarget(state, state.Opacity, opacity, transition);
+                Arrange(state);
+            }
+
         }
 
-        // Where the solver put a node: its rect's centre, moved by its Offset (y up), and its size.
+        // What Arrange tells content that layout does not size.
+        private static readonly Vector2 Unarranged = new(-1f, -1f);
+
+        // Tells a laid-out node's content the size its node is going to (Arrange), so it lays itself out there while its
+        // rect springs there. A root keeps the rect it is given, which is its size; what has left layout keeps the size
+        // it had, and is drawn as it was while it fades.
+        private static void Arrange(NodeState state)
+        {
+            if (state.PassIndex < 0) return;
+            var content = s_solver[state.PassIndex].Content;
+            if (content != null)
+                content.Arrange(state.PassParent != null ? state.Size.Target : Unarranged);
+        }
+
+        // Where the solver put a node: its rect's centre, moved by its Offset (y up), and its size. One floating against
+        // an element is moved on from there to where the element is placed and drawn (both are its ShiftOf).
         private static void TargetOf(NodeState state, out Vector2 centre, out Vector2 size)
         {
             var rect = s_solver[state.PassIndex].Rect;
-            var offset = state.Node.Offset;
-            centre = new Vector2(rect.x + rect.width * 0.5f + offset.x, rect.y + rect.height * 0.5f - offset.y);
+            centre = rect.center + ShiftOf(state);
             size = rect.size;
+        }
+
+        // A node floating against an element takes up the scroll offsets stepped this frame, which its target takes
+        // in, so it is drawn on the element as the element is drawn this frame rather than a frame behind a glide: at
+        // rest it is put there, and on its way it heads there, as with any change outside Animate. Inside a held node
+        // it stays where it was stopped, as Place leaves it.
+        private static void FollowElement(NodeState state)
+        {
+            if (state.PassParent == null || state.PassIndex < 0 || state.PassFrozen
+                || s_solver[state.PassIndex].Floating.AttachTo != FloatingAttach.Element)
+                return;
+            TargetOf(state, out var centre, out _);
+            if (centre != state.Position.Target)
+                Retarget(state, state.Position, centre, null);
         }
 
         // A node found under a different layout parent carries where it is, how fast it is going and where it was
         // going over into the new one's layout space, through world space, so it moves on from where it was drawn.
-        // Out from under the old one (a root now) its rect is its own again; in from being a root (or from a parent
-        // that is gone) it starts from where its rect is drawn. Going through where it is drawn, a scroll container's
-        // offset comes off on the way out (drawn = centre - offset) and goes back on on the way in, so it does not
-        // jump by it; a velocity, a difference, is the same either way.
+        // Out from under the old one (a root now) its rect is its own again, and what it was moving for there is let
+        // go of on its way; in from being a root (or from a parent that is gone) it starts from where its rect is
+        // drawn. Going through where it is drawn, a scroll container's offset comes off on the way out (drawn = centre -
+        // offset) and goes back on on the way in, so it does not jump by it; a velocity, a difference, is the same
+        // either way.
         private static void Reparent(NodeState state, NodeState parent)
         {
             var old = state.Parent;
@@ -618,6 +851,7 @@ namespace TimboJimbo.UI.Layout
                 Stop(state.Position);
                 Stop(state.Size);
                 Stop(state.Scale);
+                state.Held = false;
                 Disown(state);
                 return;
             }
@@ -690,8 +924,8 @@ namespace TimboJimbo.UI.Layout
             return left * (sign * curvature * 0.68f * length * omega);
         }
 
-        // Sets a spring moving for `transition` (or for none), letting go of the one it was moving for. One setting off
-        // from rest notes the frame, which does not step it.
+        // Sets a spring moving for `transition` (or for none), letting go of the one it was moving for, which it is
+        // taken over from on its way. One setting off from rest notes the frame, which does not step it.
         private static void Hold(Spring spring, LayoutTransition transition)
         {
             if (spring.Transition != transition)
@@ -708,23 +942,28 @@ namespace TimboJimbo.UI.Layout
             }
         }
 
-        // Puts a spring where it is going, at rest, letting go of its transition.
-        private static void Stop(Spring spring)
+        // Puts a spring where it is going, at rest, letting go of its transition, having `arrived` there or not (see
+        // Release).
+        private static void Stop(Spring spring, bool arrived = false)
         {
             spring.Value = spring.Target;
             spring.Velocity = Vector2.zero;
             spring.Delay = 0f;
             spring.Moving = false;
-            Release(spring);
+            Release(spring, arrived);
         }
 
         // Lets go of the transition a spring was moving for; one with nothing left moving finishes once the pass under
-        // way is over.
-        private static void Release(Spring spring)
+        // way is over. Unless the spring `arrived` where it was going (stepped there, or skipped there), it was let go
+        // of on its way (taken over, caught, its node gone, a press taking hold of its scroll), and the transition does
+        // not complete.
+        private static void Release(Spring spring, bool arrived = false)
         {
             var transition = spring.Transition;
             if (transition == null) return;
             spring.Transition = null;
+            if (!arrived)
+                transition.Interrupted = true;
             if (--transition.Moving <= 0)
             {
                 transition.Moving = 0;
@@ -767,12 +1006,12 @@ namespace TimboJimbo.UI.Layout
             if (!spring.Moving) return;
             if (!playing)
             {
-                Stop(spring);
+                Stop(spring, arrived: true);
                 return;
             }
             if (!step || spring.SetOff == Time.frameCount) return;
             if (spring.Step(dt))
-                Stop(spring);
+                Stop(spring, arrived: true);
         }
 
         // ── Drawing ──────────────────────────────────────────────────────────────
@@ -781,8 +1020,9 @@ namespace TimboJimbo.UI.Layout
         // unchanged scene is not dirtied in edit mode and UGUI rebuilds nothing for nothing. A non-root's RectTransform
         // is anchored at its parent's top-left corner, pivoted on its centre, at its centre (y up; moved back by its
         // parent's scroll offset, when its parent scrolls) and size, scaled around it. Its CanvasGroup takes its
-        // opacity, and blocks raycasts only while it is Visible; one is added only once it is needed (faded, or not to
-        // be clicked).
+        // opacity, and blocks raycasts only while it is Visible and not moving for a change that is not interactive
+        // (which then takes the pointer from everything inside it too); one is added only once it is needed (faded, or
+        // not to be clicked).
         private static void Write(NodeState state)
         {
             var node = state.Node;
@@ -806,7 +1046,8 @@ namespace TimboJimbo.UI.Layout
             }
 
             float alpha = Mathf.Clamp01(state.Opacity.Value.x);
-            bool clickable = node.Display == DisplayMode.Visible;
+            bool clickable = node.Display == DisplayMode.Visible && !Uninteractive(state.Position) && !Uninteractive(state.Size)
+                && !Uninteractive(state.Opacity) && !Uninteractive(state.Scale);
             if (state.Group == null && !node.TryGetComponent(out state.Group))
             {
                 if (alpha >= 1f && clickable) return;
@@ -815,6 +1056,11 @@ namespace TimboJimbo.UI.Layout
             if (state.Group.alpha != alpha) state.Group.alpha = alpha;
             if (state.Group.blocksRaycasts != clickable) state.Group.blocksRaycasts = clickable;
         }
+
+        // Whether a spring is moving for a change made with interactive false: until it comes to rest, or is taken
+        // over by an interactive change, a fling or a catch (each of which lets go of that change), its node takes no
+        // pointer. Scroll offsets are not asked: a scroll springing does not move the node.
+        private static bool Uninteractive(Spring spring) => spring.Transition != null && !spring.Transition.Interactive;
 
         // Takes over a node's RectTransform (it is no longer a root), telling the editor so.
         private static void Own(NodeState state)
@@ -1030,12 +1276,13 @@ namespace TimboJimbo.UI.Layout
         }
 
         // Puts a scroll at `offset` at once, at rest, letting go of any press, glide or wheel, and of the change it was
-        // springing for.
-        private static void StopScrollAt(ScrollState scroll, Vector2 offset)
+        // springing for: having `arrived` where it was springing to (stepped or skipped there), or cut short on its
+        // way (sent somewhere else at once, or no longer scrolling that way).
+        private static void StopScrollAt(ScrollState scroll, Vector2 offset, bool arrived = false)
         {
             var spring = scroll.Offset;
             spring.Target = scroll.OnAxes(offset);
-            Stop(spring);
+            Stop(spring, arrived);
             scroll.Phase = ScrollPhase.Idle;
             scroll.Press = null;
             scroll.Dragged = false;
@@ -1043,8 +1290,8 @@ namespace TimboJimbo.UI.Layout
             scroll.Wheeling = false;
         }
 
-        // A press takes hold of a scroll: it stops where it is drawn (letting go of the change it was springing for)
-        // and is held, following the press's drag once one sets off.
+        // A press takes hold of a scroll: it stops where it is drawn (letting go of the change it was springing for, on
+        // its way) and is held, following the press's drag once one sets off.
         private static void TakeHold(ScrollState scroll, PointerEventData press)
         {
             var spring = scroll.Offset;
@@ -1098,7 +1345,7 @@ namespace TimboJimbo.UI.Layout
                     LetGo(scroll, Vector2.zero);
                 if ((scroll.Phase == ScrollPhase.Gliding || scroll.Phase == ScrollPhase.Springing)
                     && step && scroll.Offset.SetOff != Time.frameCount && scroll.Step(dt))
-                    StopScrollAt(scroll, scroll.Offset.Target);
+                    StopScrollAt(scroll, scroll.Offset.Target, arrived: true);
             }
             if (scroll.Offset.Value != scroll.Raised)
                 QueueScrolled(state);
@@ -1277,6 +1524,59 @@ namespace TimboJimbo.UI.Layout
             return scroll != null && scroll.Axis != ScrollAxis.None ? scroll.Offset.Value : Vector2.zero;
         }
 
+        // How far a node floating against an element goes from where the solver put it (against the element as laid
+        // out) to be on the element as it is placed and drawn: on by how far the element is drawn from where it was
+        // laid out by itself (ShiftOf) and by how far each node the element is inside and it is not moves what is
+        // inside (MovedBy), and back by the same for each node it is inside and the element is not. What both are
+        // inside moves both alike and is left out, so a scroll they share adds nothing, not even rounding, as it
+        // glides. When the node is inside the element, the element is one of those: its shift moves both, and its
+        // scroll only the node. Both were laid out in this pass, in one tree, whose units the solver takes to be one.
+        private static Vector2 OnElement(NodeState node, NodeState element)
+        {
+            var shift = ShiftOf(element);
+            var moved = shift;
+            NodeState a = node.PassParent, b = element.PassParent;
+            int depthA = DepthOf(a), depthB = DepthOf(b);
+            // Going up from the node, the element is met when the node is inside it: its shift is known already, and
+            // working it out again would double the work at each such node floating inside another.
+            for (; depthA > depthB; depthA--, a = a.PassParent)
+                moved -= a == element ? shift - ScrolledBy(a) : MovedBy(a);
+            for (; depthB > depthA; depthB--, b = b.PassParent)
+                moved += MovedBy(b);
+            for (; a != b; a = a.PassParent, b = b.PassParent)
+                moved += MovedBy(b) - MovedBy(a);
+            return moved;
+        }
+
+        // How far what is inside a node is drawn from where it is laid out, by the node alone: on by its shift and back
+        // by its scroll offset.
+        private static Vector2 MovedBy(NodeState state) => ShiftOf(state) - ScrolledBy(state);
+
+        // How far a node is drawn from where the solver put it by itself, in layout space (y down): its Offset and,
+        // when it floats against an element, how far that moves it on (OnElement), so a node floating against it (or
+        // against something in it, or from in it against something outside it) follows it as it follows its own
+        // element. That goes back only through nodes the solver placed before it, so it comes to an end. A root's
+        // moves nothing, its rect being its own.
+        private static Vector2 ShiftOf(NodeState state)
+        {
+            if (state.PassParent == null) return Vector2.zero;
+            var offset = state.Node.Offset;
+            var shift = new Vector2(offset.x, -offset.y);
+            ref var solved = ref s_solver[state.PassIndex];
+            if (solved.Floating.AttachTo == FloatingAttach.Element)
+                shift += OnElement(state, s_solved[solved.Element]);
+            return shift;
+        }
+
+        // How many nodes up from it its layout tree's root is, counting both.
+        private static int DepthOf(NodeState state)
+        {
+            int depth = 0;
+            for (; state != null; state = state.PassParent)
+                depth++;
+            return depth;
+        }
+
         // The RectTransform whose layout space a node's position is in (null for a root, or when that is gone).
         private static RectTransform SpaceOf(NodeState state)
         {
@@ -1307,6 +1607,12 @@ namespace TimboJimbo.UI.Layout
             var toRect = to.rect;
             return new Vector2(local.x - toRect.xMin, toRect.yMax - local.y);
         }
+
+        // How long a unit of `space`'s layout space is in world units, along its x and along its y. A size grows along
+        // those axes whichever way they point on screen, so a size's rate is scaled by their lengths into world units
+        // and back, where a position's velocity is turned (and flipped from y down).
+        private static Vector2 UnitOf(RectTransform space) =>
+            new(space.TransformVector(Vector3.right).magnitude, space.TransformVector(Vector3.up).magnitude);
 
         // A velocity in one layout space (y down), in another, through world space.
         private static Vector2 VectorTo(RectTransform from, RectTransform to, Vector2 vector)

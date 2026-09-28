@@ -5,8 +5,9 @@ namespace TimboJimbo.UI.Layout
 {
     /// <summary>
     /// A node of a layout, as Clay's elements: sized along each axis (fit, grow, fixed or percent), padded, laying its
-    /// children out one way with a gap between and aligned, or floating against its parent or its root. A node whose
-    /// parent is not a node is a root: it keeps the rect it is given, and lays its children out inside it.
+    /// children out one way with a gap between and aligned, or floating against its parent, its root or another node
+    /// in its tree. A node whose parent is not a node is a root: it keeps the rect it is given, and lays its children
+    /// out inside it.
     /// The layout system owns every other node's RectTransform (anchors, pivot, position, size and scale): change
     /// where a node goes through its layout, and by <see cref="Offset"/>. A change made in
     /// <see cref="LayoutSystem.Animate"/> moves the nodes it gives somewhere new on springs, from where they are and at
@@ -42,7 +43,7 @@ namespace TimboJimbo.UI.Layout
         [Tooltip("Width over height: when above 0, its height follows its width.")]
         [SerializeField, Min(0f)] private float _aspectRatio;
 
-        [Tooltip("Floats it out of its parent's flow, placed against its parent or its root.")]
+        [Tooltip("Floats it out of its parent's flow, placed against its parent, its root or another node in its tree.")]
         [SerializeField] private Floating _floating;
 
         [Tooltip("Whether it is shown. Hidden keeps its space; None leaves layout, its siblings closing up.")]
@@ -81,7 +82,11 @@ namespace TimboJimbo.UI.Layout
         /// <summary>Width over height: when above 0, its height follows its width.</summary>
         public float AspectRatio { get => _aspectRatio; set { _aspectRatio = Mathf.Max(0f, value); Changed(); } }
 
-        /// <summary>Floats it out of its parent's flow, placed against its parent or its root.</summary>
+        /// <summary>
+        /// Floats it out of its parent's flow, placed against its parent, its root or another node in its tree
+        /// (<see cref="Floating.Element"/>). Changed inside <see cref="LayoutSystem.Animate"/> (a new element, say), it
+        /// springs there from where it is drawn.
+        /// </summary>
         public Floating Floating { get => _floating; set { _floating = value; Changed(); } }
 
         /// <summary>Whether it is shown. Hidden keeps its space; None leaves layout, its siblings closing up.</summary>
@@ -129,21 +134,39 @@ namespace TimboJimbo.UI.Layout
         /// <summary>Whether it is a root: its parent is not a node, so it keeps the rect it is given.</summary>
         public bool IsRoot => LayoutSystem.IsRoot(this);
 
-        /// <summary>How fast it is moving on screen, in world units a second (screen pixels, on a Screen Space Overlay canvas).</summary>
+        /// <summary>
+        /// How fast its centre is moving within its parent, in world units a second (screen pixels, on a Screen Space
+        /// Overlay canvas); zero when it is not moving. It is its own motion: a node riding a moving parent is at rest
+        /// here, however its parent moves on screen.
+        /// </summary>
         public Vector3 Velocity => LayoutSystem.VelocityOf(this);
 
         /// <summary>
-        /// Sets it moving at <paramref name="velocity"/>, in world units a second (screen pixels, on a Screen Space
-        /// Overlay canvas, what pointer deltas are in), as a drag lets go of it: it springs to where layout puts it,
-        /// carrying that velocity, bowing out the way it was thrown before curving round. A change animated after,
-        /// such as putting its <see cref="Offset"/> back, sets off from it.
+        /// How fast its width and height are growing (negative when shrinking), in world units a second (screen pixels,
+        /// on a Screen Space Overlay canvas); zero when its size is not moving.
         /// </summary>
-        public void Fling(Vector3 velocity) => LayoutSystem.Fling(this, velocity);
+        public Vector2 SizeVelocity => LayoutSystem.SizeVelocityOf(this);
+
+        /// <summary>
+        /// Sets it moving at <paramref name="velocity"/> within its parent, in world units a second (screen pixels, on a
+        /// Screen Space Overlay canvas, what pointer deltas are in), as a drag lets go of it: it springs to where layout puts it,
+        /// carrying that velocity, bowing out the way it was thrown before curving round. <paramref name="sizeVelocity"/>
+        /// is how fast its width and height are growing, in the same units, given to its size as
+        /// <paramref name="velocity"/> is to its centre (left at zero, its size is left as it is): a bottom sheet dragged
+        /// by its height with its bottom edge pinned, its top edge moving up at v, is flung with its centre moving up at
+        /// v / 2 and its size growing at (0, v). A change animated after, such as putting its <see cref="Offset"/> back
+        /// or setting its height to a detent, sets off from both. Whatever change it was moving for is let go of on its
+        /// way (it does not complete).
+        /// </summary>
+        public void Fling(Vector3 velocity, Vector2 sizeVelocity = default) => LayoutSystem.Fling(this, velocity, sizeVelocity);
 
         /// <summary>
         /// Stops it where it is drawn, as a drag taking hold of it: its <see cref="Offset"/> is changed so that is where
-        /// it goes, and it stops moving there (its size, opacity and scale carry on where they were going). A drag then
-        /// moves its Offset, and letting go flings it. Returns whether it was moving.
+        /// it goes, and it stops moving there. Its size and opacity stop too, as does everything inside it, and stay
+        /// as they are until an Animate changes it (letting go of a drag, putting its Offset back, sets them off again
+        /// from there) or layout gives it a new size. A drag then moves its Offset, and letting go flings it. A change
+        /// it was moving for is let go of on its way, so it does not complete (<see cref="LayoutTransition.Completed"/>),
+        /// and it takes the pointer again if that change had taken it away. Returns whether it was moving.
         /// </summary>
         public bool Catch() => LayoutSystem.Catch(this);
 

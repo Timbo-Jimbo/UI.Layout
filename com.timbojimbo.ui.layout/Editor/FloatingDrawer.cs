@@ -5,8 +5,9 @@ using UnityEngine;
 namespace TimboJimboEditor.UI.Layout
 {
     /// <summary>
-    /// What a node floats against, on its label's line; then, only while it floats (or while nodes that differ in what
-    /// they float against are edited together), where it is placed: its point, the point it meets, and its offset.
+    /// What a node floats against, on its label's line; then, only while it floats against an element, that element;
+    /// and only while it floats at all, where it is placed: its point, the point it meets, and its offset. While nodes
+    /// that differ in what they float against are edited together, all of them show.
     /// </summary>
     [CustomPropertyDrawer(typeof(Floating))]
     public sealed class FloatingDrawer : PropertyDrawer
@@ -19,6 +20,8 @@ namespace TimboJimboEditor.UI.Layout
         public override float GetPropertyHeight(SerializedProperty property, GUIContent label)
         {
             float height = EditorGUIUtility.singleLineHeight;
+            if (ShowsElement(property))
+                height += EditorGUIUtility.standardVerticalSpacing + EditorGUI.GetPropertyHeight(property.FindPropertyRelative(nameof(Floating.Element)));
             if (!ShowsPlacement(property))
                 return height;
             foreach (var name in s_placement)
@@ -28,8 +31,9 @@ namespace TimboJimboEditor.UI.Layout
 
         public override void OnGUI(Rect position, SerializedProperty property, GUIContent label)
         {
-            // Settled up front, as GetPropertyHeight settled it: floating or not from this event's popup lays out on the
+            // Settled up front, as GetPropertyHeight settled them: what the popup picks in this event lays out on the
             // next.
+            bool element = ShowsElement(property);
             bool placement = ShowsPlacement(property);
 
             label = EditorGUI.BeginProperty(position, label, property);
@@ -41,20 +45,31 @@ namespace TimboJimboEditor.UI.Layout
             EditorGUI.indentLevel = 0;
             EditorGUI.PropertyField(field, property.FindPropertyRelative(nameof(Floating.AttachTo)), GUIContent.none);
 
+            EditorGUI.indentLevel = indent + 1;
+            if (element)
+                Row(ref row, property.FindPropertyRelative(nameof(Floating.Element)));
             if (placement)
             {
-                EditorGUI.indentLevel = indent + 1;
                 foreach (var name in s_placement)
-                {
-                    var child = property.FindPropertyRelative(name);
-                    row.y = row.yMax + EditorGUIUtility.standardVerticalSpacing;
-                    row.height = EditorGUI.GetPropertyHeight(child);
-                    EditorGUI.PropertyField(row, child, true);
-                }
+                    Row(ref row, property.FindPropertyRelative(name));
             }
 
             EditorGUI.indentLevel = indent;
             EditorGUI.EndProperty();
+        }
+
+        // Draws a field on the rows below the one given, which it moves on to.
+        private static void Row(ref Rect row, SerializedProperty child)
+        {
+            row.y = row.yMax + EditorGUIUtility.standardVerticalSpacing;
+            row.height = EditorGUI.GetPropertyHeight(child);
+            EditorGUI.PropertyField(row, child, true);
+        }
+
+        private static bool ShowsElement(SerializedProperty property)
+        {
+            var attach = property.FindPropertyRelative(nameof(Floating.AttachTo));
+            return attach.hasMultipleDifferentValues || attach.intValue == (int)FloatingAttach.Element;
         }
 
         private static bool ShowsPlacement(SerializedProperty property)

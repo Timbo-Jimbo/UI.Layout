@@ -9,9 +9,9 @@ namespace TimboJimboEditor.UI.Layout
     /// Inspector for <see cref="LayoutNode"/>, its settings grouped the way they read: whether it shows, its size, how
     /// it lays out what is inside it, which way it scrolls that, where it is placed apart from that (floating, and moved
     /// by its offset), then how it moves. What does not apply is hidden: its height while its aspect ratio sets it from
-    /// its width, and, through their drawers, a sizing's value but for fixed and percent and a floating's placement but
-    /// while it floats. In play mode a scroll container also shows, read only, how far it is scrolled, how far it can
-    /// be, and whether it is scrolling.
+    /// its width, and, through their drawers, a sizing's value but for fixed and percent, a floating's placement but
+    /// while it floats, and its element but while it floats against one. In play mode a scroll container also shows,
+    /// read only, how far it is scrolled, how far it can be, and whether it is scrolling.
     /// </summary>
     [CustomEditor(typeof(LayoutNode))]
     [CanEditMultipleObjects]

@@ -38,6 +38,13 @@ namespace TimboJimbo.UI.Layout
         // taking clicks): the system owns its alpha and whether it blocks raycasts.
         public CanvasGroup Group;
 
+        // Whether it was caught (Catch) with its size or opacity moving: they stay where they were stopped, rather than
+        // go where layout puts them, until an Animate changes it or layout gives it a new size or opacity (HeldSize and
+        // HeldOpacity are what layout gave it when it was caught). Position needs no hold: Catch moves its Offset.
+        public bool Held;
+        public Vector2 HeldSize;
+        public Vector2 HeldOpacity;
+
         // Its scroll offset and what moves it, once it has scrolled (its Scroll not None), kept if it stops: its
         // LayoutNode children are drawn moved by that offset. Null for a node that never has.
         public ScrollState Scroll;
@@ -53,6 +60,9 @@ namespace TimboJimbo.UI.Layout
         // Whether it is not drawn as the pass starts with nothing it is seen to move from: never placed, back in layout
         // from None having faded out, or under something that is. What it is given goes there at once.
         public bool PassUnseen;
+
+        // Whether something above it is held (Catch): it stays where it was stopped with it, as seen inside it.
+        public bool PassFrozen;
 
         // How many transforms are above it, for ordering roots (outer before inner).
         public int Depth;

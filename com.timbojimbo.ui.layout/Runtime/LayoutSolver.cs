@@ -23,6 +23,11 @@ namespace TimboJimbo.UI.Layout
         public AlignY AlignY;
         public float AspectRatio;
         public Floating Floating;
+        // With Floating.AttachTo Element, the index of the node it is attached to (the system finds it in the tree,
+        // attaching the node to its parent instead when it is not laid out there); -1 otherwise. When the element
+        // cannot be sized and placed before the node (it is the node, inside it, or attached back to it), the solver
+        // sets AttachTo to Parent and leaves this, so the system can tell.
+        public int Element;
         // Which way it scrolls: along that axis its children are never squeezed, running past its edge instead, and it
         // can itself be squeezed to nothing that way (what it shows is not what it holds).
         public ScrollAxis Scroll;
@@ -65,6 +70,19 @@ namespace TimboJimbo.UI.Layout
 
         // Whether its parent's pass under way is still growing or shrinking it.
         internal bool Resizing;
+
+        // The order the passes that size and place nodes go in, as a list through the nodes from the root (-1 at its
+        // end): every node after its parent, and one attached to an element after the element, wherever each is in
+        // the tree, so the element's size and rect are final when the node is sized and placed against them.
+        internal int Next;
+
+        // Whether it is in that order yet; and, for a node attached to an element that was not in it yet when the
+        // node's parent went in, whether it is waiting for the element, in a list the element heads (the first node
+        // waiting for it, and the next waiting for the same element, -1 for none).
+        internal bool Ordered;
+        internal bool Waiting;
+        internal int FirstWaiting;
+        internal int NextWaiting;
     }
 
     /// <summary>
@@ -87,13 +105,15 @@ namespace TimboJimbo.UI.Layout
         /// Follows Clay's Clay__SizeContainersAlongAxis and Clay__CalculateFinalLayout, with these differences: content
         /// is measured through <see cref="ILayoutMeasurable"/> (unwrapped for the fit width, then wrapped to the final
         /// width for the height, which is also the least a content node's height can be shrunk to); floating nodes
-        /// attach only to their parent or the root, and grow or take a percentage of its content box (inside its
-        /// padding) rather than its whole rect; and a run that overflows its parent starts at the padding whatever the
-        /// alignment. As in Clay, percent children along a parent's direction take their part of what its padding and
-        /// the gaps between its children leave (so two halves and a gap fit), and a fitted floating node keeps its own
-        /// size. A scroll container is Clay's too, along each axis it scrolls: it squeezes none of its children, which
-        /// run on past its end instead (a grow child still takes the room left, and across its direction fills out to
-        /// the widest child), and it can itself be squeezed to nothing that way, while it still fits to all it holds.
+        /// attached to their parent or the root grow or take a percentage of its content box (inside its padding)
+        /// rather than its whole rect, while one attached to an element takes the element's whole rect; the passes
+        /// that size and place go parents first but put a node attached to an element after the element, wherever it
+        /// is in the tree; and a run that overflows its parent starts at the padding whatever the alignment. As in
+        /// Clay, percent children along a parent's direction take their part of what its padding and the gaps between
+        /// its children leave (so two halves and a gap fit), and a fitted floating node keeps its own size. A scroll
+        /// container is Clay's too, along each axis it scrolls: it squeezes none of its children, which run on past
+        /// its end instead (a grow child still takes the room left, and across its direction fills out to the widest
+        /// child), and it can itself be squeezed to nothing that way, while it still fits to all it holds.
         /// Unlike Clay, across its direction on an axis it scrolls, its children are aligned within the widest of them
         /// when that runs past it, as a stack in SwiftUI's ScrollView is, so all of them lie within its scroll range.
         /// Where it is scrolled to is not the solver's: the system moves its children by that as it draws them.
@@ -110,20 +130,99 @@ namespace TimboJimbo.UI.Layout
                 if (!nodes[i].Floating.IsFloating)
                     nodes[nodes[i].Parent].FlowCount++;
 
+            // The order sizes are shared out and positions given in: parents first, and a node attached to an element
+            // after the element.
+            Order(nodes, count);
+
             // Widths: fitted to content up the tree, then the root's given and each parent's shared out down it.
             FitAxis(nodes, count, 0);
             nodes[0].Size.x = rootSize.x;
-            DistributeAxis(nodes, count, 0);
+            DistributeAxis(nodes, 0);
 
             // Content wrapped to the widths it got, then heights the same way as widths.
             WrapContent(nodes, count);
             FitAxis(nodes, count, 1);
             nodes[0].Size.y = rootSize.y;
-            DistributeAxis(nodes, count, 1);
+            DistributeAxis(nodes, 1);
 
             // What each node holds, from the sizes everything ended up with, then where it all goes.
             SizeContent(nodes, count);
-            Place(nodes, count);
+            Place(nodes);
+        }
+
+        // ── Order ────────────────────────────────────────────────────────────────
+
+        // Makes the order the passes that share out sizes and give positions go in (Next): pre-order, but a node
+        // attached to an element not in the order yet waits for it, with everything inside it, and goes in straight
+        // after it. Without such nodes it is pre-order itself. What is still waiting at the end waits, through the
+        // elements it is attached to, on itself (it is attached to itself, to something inside it, or to something
+        // attached back to it): its placement is circular, so it is attached to its parent instead and goes in after
+        // it (in already, as it was met). All of it at once, so which falls back does not depend on sibling order.
+        // Each node goes in once.
+        private static void Order(SolverNode[] nodes, int count)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                ref var node = ref nodes[i];
+                node.Next = -1;
+                node.FirstWaiting = -1;
+                node.Ordered = false;
+                node.Waiting = false;
+            }
+
+            int last = -1;
+            Append(nodes, 0, ref last);
+            while (true)
+            {
+                bool circular = false;
+                for (int i = 1; i < count; i++)
+                {
+                    if (!nodes[i].Waiting) continue;
+                    nodes[i].Floating.AttachTo = FloatingAttach.Parent;
+                    circular = true;
+                }
+                if (!circular) return;
+
+                // Any that start waiting as these go in are attached to elements still, and are seen to next round.
+                for (int i = 1; i < count; i++)
+                {
+                    if (!nodes[i].Waiting || nodes[i].Floating.AttachTo != FloatingAttach.Parent) continue;
+                    nodes[i].Waiting = false;
+                    Append(nodes, i, ref last);
+                }
+            }
+        }
+
+        // Puts a node in the order, then what was waiting for it, then each of its children with what is inside it;
+        // a child attached to an element not in the order yet waits for it instead.
+        private static void Append(SolverNode[] nodes, int index, ref int last)
+        {
+            nodes[index].Ordered = true;
+            if (last >= 0) nodes[last].Next = index;
+            last = index;
+
+            for (int w = nodes[index].FirstWaiting; w >= 0; w = nodes[w].NextWaiting)
+            {
+                // One that fell back to its parent has gone in already.
+                if (!nodes[w].Waiting) continue;
+                nodes[w].Waiting = false;
+                Append(nodes, w, ref last);
+            }
+
+            for (int c = nodes[index].FirstChild; c >= 0; c = nodes[c].NextSibling)
+            {
+                ref var child = ref nodes[c];
+                if (child.Floating.AttachTo == FloatingAttach.Element && !nodes[child.Element].Ordered)
+                {
+                    child.Waiting = true;
+                    child.NextWaiting = nodes[child.Element].FirstWaiting;
+                    nodes[child.Element].FirstWaiting = c;
+                }
+                else
+                {
+                    Append(nodes, c, ref last);
+                }
+            }
         }
 
         // ── Sizing ───────────────────────────────────────────────────────────────
@@ -222,14 +321,17 @@ namespace TimboJimbo.UI.Layout
         // children; across it, grow children fill it and wider ones shrink to it. A scroll container, the way it
         // scrolls, takes nothing from its children: along it they overflow, and across it they fill (and are kept
         // within) the widest of them when that is wider than it. Floating children are sized against what they are
-        // attached to.
-        private static void DistributeAxis(SolverNode[] nodes, int count, int axis)
+        // attached to: their parent or the root with the rest of the parent's children, and an element in their own
+        // turn, which the order puts after the element's (so its size is final), before they size their children.
+        private static void DistributeAxis(SolverNode[] nodes, int axis)
         {
             float rootContent = nodes[0].Size[axis] - PaddingOf(nodes[0], axis);
 
-            for (int p = 0; p < count; p++)
+            for (int p = 0; p >= 0; p = nodes[p].Next)
             {
                 ref var parent = ref nodes[p];
+                if (p > 0 && parent.Floating.AttachTo == FloatingAttach.Element && !(axis == 1 && parent.AspectRatio > 0f))
+                    SizeFloating(ref parent, SizingOf(parent, axis), axis, nodes[parent.Element].Size[axis]);
                 if (parent.FirstChild < 0) continue;
 
                 float content = parent.Size[axis] - PaddingOf(parent, axis);
@@ -249,7 +351,8 @@ namespace TimboJimbo.UI.Layout
 
                     if (child.Floating.IsFloating)
                     {
-                        if (!followsWidth)
+                        // One attached to an element is sized in its own turn.
+                        if (!followsWidth && child.Floating.AttachTo != FloatingAttach.Element)
                             SizeFloating(ref child, sizing, axis, child.Floating.AttachTo == FloatingAttach.Root ? rootContent : content);
                         continue;
                     }
@@ -307,9 +410,10 @@ namespace TimboJimbo.UI.Layout
             }
         }
 
-        // A floating child, sized against the content box of what it is attached to as a child across that node's
-        // direction is: grow fills it and percent is a part of it. A fitted one keeps its own size even when wider (a
-        // tooltip may be wider than its button), as Clay's floating elements do.
+        // A floating child, sized against the content box of what it is attached to (the whole rect of an element, so
+        // a highlight that grows both ways fills the tab it is behind) as a child across that node's direction is: grow
+        // fills it and percent is a part of it. A fitted one keeps its own size even when wider (a tooltip may be wider
+        // than its button), as Clay's floating elements do.
         private static void SizeFloating(ref SolverNode child, Sizing sizing, int axis, float against)
         {
             if (sizing.Mode == SizingMode.Percent)
@@ -485,18 +589,29 @@ namespace TimboJimbo.UI.Layout
         // Clay's Clay__CalculateFinalLayout positioning, parents before children: each parent's flow children run
         // along its direction from its padding, the run moved by its alignment when there is room to spare, each child
         // aligned across it on its own. Floating children are placed against their parent's rect or the root's, which
-        // is known by then since every parent is placed before its children. Where a scroll container is scrolled to
-        // plays no part: its children go where they would at 0, and the system moves them by it as it draws them.
-        private static void Place(SolverNode[] nodes, int count)
+        // is known by then since every parent is placed before its children; one attached to an element is placed in
+        // its own turn, which the order puts after both its parent's and the element's. Where a scroll container is
+        // scrolled to plays no part: its children go where they would at 0, and the system moves them by it as it
+        // draws them (and a node attached to an element inside it by the same, as it gives it its target).
+        private static void Place(SolverNode[] nodes)
         {
             ref var root = ref nodes[0];
             root.Rect = new Rect(Vector2.zero, root.Size);
             root.RootRect = root.Rect;
             Vector2 rootSize = root.Size;
 
-            for (int p = 0; p < count; p++)
+            for (int p = 0; p >= 0; p = nodes[p].Next)
             {
                 ref var parent = ref nodes[p];
+                if (p > 0 && parent.Floating.AttachTo == FloatingAttach.Element)
+                {
+                    // The element's rect, brought into its parent's space.
+                    ref var up = ref nodes[parent.Parent];
+                    ref var element = ref nodes[parent.Element];
+                    var topLeft = FloatingTopLeft(parent, element.RootRect.position - up.RootRect.position, element.Size);
+                    parent.Rect = new Rect(topLeft, parent.Size);
+                    parent.RootRect = new Rect(up.RootRect.position + topLeft, parent.Size);
+                }
                 if (parent.FirstChild < 0) continue;
 
                 int along = parent.Direction == LayoutDirection.LeftToRight ? 0 : 1;
@@ -525,10 +640,18 @@ namespace TimboJimbo.UI.Layout
                 for (int c = parent.FirstChild; c >= 0; c = nodes[c].NextSibling)
                 {
                     ref var child = ref nodes[c];
+                    // One attached to an element is placed in its own turn.
+                    if (child.Floating.AttachTo == FloatingAttach.Element) continue;
+
                     Vector2 topLeft;
-                    if (child.Floating.IsFloating)
+                    if (child.Floating.AttachTo == FloatingAttach.Root)
                     {
-                        topLeft = FloatingTopLeft(parent, child, rootSize);
+                        // The root's rect, brought into its parent's space.
+                        topLeft = FloatingTopLeft(child, -parent.RootRect.position, rootSize);
+                    }
+                    else if (child.Floating.IsFloating)
+                    {
+                        topLeft = FloatingTopLeft(child, Vector2.zero, parent.Size);
                     }
                     else
                     {
@@ -545,23 +668,11 @@ namespace TimboJimbo.UI.Layout
         }
 
         // Where a floating child's top-left goes in its parent's layout space: its own point put on the target point of
-        // what it is attached to (its parent's rect, or the root's rect brought into its parent's space), then moved by
-        // its offset (given y up, so flipped).
-        private static Vector2 FloatingTopLeft(in SolverNode parent, in SolverNode child, Vector2 rootSize)
+        // what it is attached to (a rect at `targetMin`, sized `targetSize`, in its parent's space), then moved by its
+        // offset (given y up, so flipped).
+        private static Vector2 FloatingTopLeft(in SolverNode child, Vector2 targetMin, Vector2 targetSize)
         {
             var floating = child.Floating;
-            Vector2 targetMin, targetSize;
-            if (floating.AttachTo == FloatingAttach.Root)
-            {
-                targetMin = -parent.RootRect.position;
-                targetSize = rootSize;
-            }
-            else
-            {
-                targetMin = Vector2.zero;
-                targetSize = parent.Size;
-            }
-
             Vector2 target = targetMin + Vector2.Scale(targetSize, PointFraction(floating.TargetPoint));
             Vector2 own = Vector2.Scale(child.Size, PointFraction(floating.Point));
             return target - own + new Vector2(floating.Offset.x, -floating.Offset.y);
