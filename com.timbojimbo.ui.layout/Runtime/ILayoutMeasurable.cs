@@ -3,23 +3,18 @@ using UnityEngine;
 namespace TimboJimbo.UI.Layout
 {
     /// <summary>
-    /// The content of a leaf node. Implement it on a component that sits on the same object as the
-    /// <see cref="LayoutNode"/>. The engine asks for the unconstrained size first, then for the size at
-    /// the width it settled on, so content that wraps (text) answers with its height for that width.
+    /// Content a node measures, as Clay measures text: a component on the node's own object (a TextBlock, an Img)
+    /// that says how big it is. A node with no layout children in its flow (floating ones do not count) fits to it.
     /// </summary>
     public interface ILayoutMeasurable
     {
-        /// <summary>The content size for the available width, in canvas units. A negative width is unconstrained.</summary>
+        /// <summary>
+        /// Its size, in the node's units, at <paramref name="availableWidth"/> (text wraps to it), or at no limit when
+        /// that is negative. A pure measure: it changes nothing.
+        /// </summary>
         Vector2 Measure(float availableWidth);
 
-        /// <summary>The narrowest the content can be laid out at (the longest word for text). 0 if it can vanish.</summary>
+        /// <summary>The narrowest it can go: a wrapped text's longest word.</summary>
         float MinWidth { get; }
-
-        /// <summary>
-        /// True when the content can be drawn at sizes between two layouts, so a transition may animate the node's
-        /// size (an image scales). False, the default, when it cannot (text re-wraps or clips), and a transition
-        /// gives the node its new size at once and animates only its position.
-        /// </summary>
-        bool SizeIsAnimatable => false;
     }
 }

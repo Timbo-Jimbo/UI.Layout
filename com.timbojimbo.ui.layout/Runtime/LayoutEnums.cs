@@ -1,60 +1,87 @@
 namespace TimboJimbo.UI.Layout
 {
-    /// <summary>The axis a node lays its children out along.</summary>
+    /// <summary>How a node is sized along one axis, as Clay sizes an element.</summary>
+    public enum SizingMode
+    {
+        /// <summary>As big as its content (its children, or what it measures), within its min and max.</summary>
+        Fit,
+
+        /// <summary>Its content's size at least, growing to fill what its parent has left over, within its min and max.</summary>
+        Grow,
+
+        /// <summary>Exactly its value.</summary>
+        Fixed,
+
+        /// <summary>
+        /// Its value (0 to 1) of its parent's size inside the padding (along its parent's direction, of what the padding
+        /// and the gaps between its siblings leave, so halves and a gap fit; but along the way a scroll container
+        /// scrolls, of what it shows, so a card of 85% stays 85% however many there are), within its min and max.
+        /// </summary>
+        Percent,
+    }
+
+    /// <summary>Which way a node lays its children out.</summary>
     public enum LayoutDirection
     {
         LeftToRight,
         TopToBottom,
     }
 
-    /// <summary>
-    /// Horizontal placement of the children within the free space. SpaceBetween applies along a left-to-right
-    /// flow only: the free space is shared out between the children, the first and last touching the padding
-    /// (one child, or no free space, sits at the left). Across a flow it is Left.
-    /// </summary>
+    /// <summary>Where a node's children sit across its width.</summary>
     public enum AlignX
     {
         Left,
         Center,
         Right,
-        SpaceBetween,
     }
 
-    /// <summary>
-    /// Vertical placement of the children within the free space. SpaceBetween applies along a top-to-bottom
-    /// flow only: the free space is shared out between the children, the first and last touching the padding
-    /// (one child, or no free space, sits at the top). Across a flow it is Top.
-    /// </summary>
+    /// <summary>Where a node's children sit down its height.</summary>
     public enum AlignY
     {
         Top,
         Center,
         Bottom,
-        SpaceBetween,
     }
 
-    /// <summary>Where a node sits across its parent's flow, in place of the parent's alignment on that axis.</summary>
-    public enum AlignSelf
+    /// <summary>Whether a node is shown, as CSS's display and visibility say.</summary>
+    public enum DisplayMode
     {
-        /// <summary>The parent's alignment.</summary>
-        Auto,
-        /// <summary>The start of the axis: the top in a left-to-right parent, the left in a top-to-bottom one.</summary>
-        Start,
-        Center,
-        /// <summary>The end of the axis: the bottom in a left-to-right parent, the right in a top-to-bottom one.</summary>
-        End,
+        /// <summary>Laid out and drawn.</summary>
+        Visible,
+
+        /// <summary>Laid out, keeping its space, but not drawn and not clickable.</summary>
+        Hidden,
+
+        /// <summary>Left out of layout, its siblings closing up, and not drawn or clickable.</summary>
+        None,
     }
 
-    /// <summary>What a floating node is positioned against. None keeps the node in the flow.</summary>
-    public enum AttachTo
+    /// <summary>What a floating node is placed against, rather than in its parent's flow.</summary>
+    public enum FloatingAttach
+    {
+        /// <summary>Not floating: laid out in its parent's flow.</summary>
+        None,
+
+        /// <summary>Placed against its parent's rect.</summary>
+        Parent,
+
+        /// <summary>Placed against its layout root's rect.</summary>
+        Root,
+    }
+
+    /// <summary>
+    /// Which way a node scrolls its children, as a Clay scroll container or a UIScrollView: it clips them, lets them run
+    /// past its edge that way rather than squeezing them, and moves them all together by its scroll offset.
+    /// </summary>
+    public enum ScrollAxis
     {
         None,
-        Parent,
-        Root,
-        Element,
+        Vertical,
+        Horizontal,
+        Both,
     }
 
-    /// <summary>A point on a rect, named column then row. The order is row-major so a point's position is derived from its value.</summary>
+    /// <summary>One of nine points on a rect: a corner, the middle of an edge, or its centre.</summary>
     public enum AttachPoint
     {
         LeftTop,

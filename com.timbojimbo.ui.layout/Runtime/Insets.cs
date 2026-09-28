@@ -1,26 +1,34 @@
-using UnityEngine;
+using System;
 
 namespace TimboJimbo.UI.Layout
 {
-    /// <summary>
-    /// Builds the Vector4 insets <see cref="LayoutNode.Padding"/> takes, in its left, right, top, bottom order
-    /// (the order of RectOffset and Box.Inset), so a call site reads as what it means.
-    /// </summary>
-    public static class Insets
+    /// <summary>Space on each side of a node's content: its padding.</summary>
+    [Serializable]
+    public struct Insets
     {
-        /// <summary>The same inset on every side.</summary>
-        public static Vector4 All(float inset) => new(inset, inset, inset, inset);
+        public float Left;
+        public float Right;
+        public float Top;
+        public float Bottom;
 
-        /// <summary><paramref name="horizontal"/> on the left and right, <paramref name="vertical"/> on the top and bottom.</summary>
-        public static Vector4 Symmetric(float horizontal, float vertical) => new(horizontal, horizontal, vertical, vertical);
+        public Insets(float left, float right, float top, float bottom)
+        {
+            Left = left;
+            Right = right;
+            Top = top;
+            Bottom = bottom;
+        }
 
-        /// <summary>Each side on its own, named so the order cannot be mistaken.</summary>
-        public static Vector4 Of(float left = 0f, float right = 0f, float top = 0f, float bottom = 0f) => new(left, right, top, bottom);
+        /// <summary>The same on every side.</summary>
+        public static Insets All(float inset) => new(inset, inset, inset, inset);
+
+        /// <summary><paramref name="horizontal"/> left and right, <paramref name="vertical"/> top and bottom.</summary>
+        public static Insets Symmetric(float horizontal, float vertical) => new(horizontal, horizontal, vertical, vertical);
+
+        /// <summary>Left plus right.</summary>
+        public float Horizontal => Left + Right;
+
+        /// <summary>Top plus bottom.</summary>
+        public float Vertical => Top + Bottom;
     }
-
-    /// <summary>Draws a Vector4 of insets with its sides labelled left, right, top and bottom.</summary>
-    internal sealed class InsetsFieldAttribute : PropertyAttribute { }
-
-    /// <summary>Draws a node's transition with the override flag beside it: Inherit, or Custom and its timing.</summary>
-    internal sealed class NodeTransitionAttribute : PropertyAttribute { }
 }
