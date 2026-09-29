@@ -22,11 +22,11 @@ namespace TimboJimbo.UI.Layout
         /// <summary>
         /// The size layout gives its node, in the node's units, told each time layout places it (every frame, so the same
         /// size again should change nothing); negative when layout no longer sizes it (a root, or a node disabled), and it
-        /// is drawn at its rect as it is. A node taken out of layout (Display None) is told nothing: it keeps the size it
-        /// had, as its rect does while it fades. While its node animates,
-        /// its rect is on its way to this size: a text wraps at it rather than at every width its rect passes through,
-        /// so it has the lines it will end with from the start, as the node's children are laid out at the node's new
-        /// size from the start. Content that should stretch with its rect (an image) ignores it.
+        /// is drawn at its rect as it is. A node taken out of layout (Display None), or thrown on as it is hidden, is told
+        /// nothing: it keeps the size it had, and is drawn as it was while it goes. While its node animates, its rect is on
+        /// its way to this size: a text wraps at it rather than at every width its rect passes through, so it has the
+        /// lines it will end with from the start, as the node's children are laid out at the node's new size from the
+        /// start. Content that should stretch with its rect (an image) ignores it.
         /// </summary>
         void Arrange(Vector2 size);
     }

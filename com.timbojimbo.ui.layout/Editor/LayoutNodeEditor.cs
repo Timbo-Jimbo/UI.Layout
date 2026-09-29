@@ -7,11 +7,12 @@ namespace TimboJimboEditor.UI.Layout
 {
     /// <summary>
     /// Inspector for <see cref="LayoutNode"/>, its settings grouped the way they read: whether it shows, its size, how
-    /// it lays out what is inside it, which way it scrolls that, where it is placed apart from that (floating, and moved
-    /// by its offset), then how it moves. What does not apply is hidden: its height while its aspect ratio sets it from
-    /// its width, and, through their drawers, a sizing's value but for fixed and percent, a floating's placement but
-    /// while it floats, and its element but while it floats against one. In play mode a scroll container also shows,
-    /// read only, how far it is scrolled, how far it can be, and whether it is scrolling.
+    /// it lays out what is inside it, which way it scrolls that, where and how it is drawn apart from that (floating,
+    /// moved by its offset, scaled and faded), then how it moves: its animation, how it appears and disappears, and the
+    /// name it is matched by. What does not apply is hidden: its height while its aspect ratio sets it from its width,
+    /// and, through their drawers, a sizing's value but for fixed and percent, a floating's placement but while it
+    /// floats, and its element but while it floats against one. In play mode a scroll container also shows, read only,
+    /// how far it is scrolled, how far it can be, and whether it is scrolling, and every node the id it is matched by.
     /// </summary>
     [CustomEditor(typeof(LayoutNode))]
     [CanEditMultipleObjects]
@@ -23,6 +24,8 @@ namespace TimboJimboEditor.UI.Layout
             "How far it can be scrolled each way: how far its content runs past its edge (0 when it fits).");
         private static readonly GUIContent s_isScrollingLabel = new("Is Scrolling",
             "Whether it is being dragged, gliding, or springing to where it scrolls.");
+        private static readonly GUIContent s_matchIdLabel = new("Match Id",
+            "Which of the nodes with its match name this is, set in code (MatchId): its own id, or else the nearest one set on a node above it, followed by that node's name; none when no id is set.");
 
         private SerializedProperty _display;
         private SerializedProperty _width;
@@ -36,16 +39,22 @@ namespace TimboJimboEditor.UI.Layout
         private SerializedProperty _scroll;
         private SerializedProperty _floating;
         private SerializedProperty _offset;
+        private SerializedProperty _scale;
+        private SerializedProperty _opacity;
         private SerializedProperty _animation;
+        private SerializedProperty _displayEffect;
+        private SerializedProperty _matchName;
 
         // The scroll axis under its group's header, where "Scroll" again would only repeat it; its tooltip is the
         // field's own.
         private GUIContent _scrollLabel;
 
-        // The scroll readout as last painted, so the inspector is drawn again only while that is out of date.
+        // The readouts as last painted, so the inspector is drawn again only while one is out of date.
         private Vector2 _shownOffset;
         private Vector2 _shownRange;
         private bool _shownScrolling;
+        private object _shownId;
+        private LayoutNode _shownIdFrom;
 
         private void OnEnable()
         {
@@ -61,7 +70,11 @@ namespace TimboJimboEditor.UI.Layout
             _scroll = serializedObject.FindProperty("_scroll");
             _floating = serializedObject.FindProperty("_floating");
             _offset = serializedObject.FindProperty("_offset");
+            _scale = serializedObject.FindProperty("_scale");
+            _opacity = serializedObject.FindProperty("_opacity");
             _animation = serializedObject.FindProperty("_animation");
+            _displayEffect = serializedObject.FindProperty("_displayEffect");
+            _matchName = serializedObject.FindProperty("_matchName");
             _scrollLabel = new GUIContent("Axis", _scroll.tooltip);
         }
 
@@ -94,29 +107,42 @@ namespace TimboJimboEditor.UI.Layout
             Header("Position");
             EditorGUILayout.PropertyField(_floating);
             EditorGUILayout.PropertyField(_offset);
+            EditorGUILayout.PropertyField(_scale);
+            EditorGUILayout.PropertyField(_opacity);
 
             Header("Motion");
             EditorGUILayout.PropertyField(_animation);
+            EditorGUILayout.PropertyField(_displayEffect);
+            EditorGUILayout.PropertyField(_matchName);
+            MatchIdReadout();
 
             serializedObject.ApplyModifiedProperties();
         }
 
-        // Draws the inspector again while the scroll readout is out of date: every frame it scrolls, once more as it
-        // comes to rest, and once when it is scrolled at once or its range changes. The inspector asks this every
-        // update, so a scroll that starts while nothing else draws it is still caught. Not while this component is
-        // folded away, where the readout is never painted and so would never be up to date.
+        // Draws the inspector again while a readout is out of date: for the scroll, every frame it scrolls, once more as
+        // it comes to rest, and once when it is scrolled at once or its range changes; for the match id, once when code
+        // sets it here or above. The inspector asks this every update, so a change made while nothing else draws it is
+        // still caught. Not while this component is folded away, where the readouts are never painted and so would
+        // never be up to date.
         public override bool RequiresConstantRepaint()
         {
-            return ShowsReadout(out var node) && InternalEditorUtility.GetIsInspectorExpanded(node)
+            if (!ShowsReadouts(out var node) || !InternalEditorUtility.GetIsInspectorExpanded(node)) return false;
+
+            bool scrollBehind = node.Scroll != ScrollAxis.None
                 && (node.ScrollOffset != _shownOffset || node.ScrollRange != _shownRange || node.IsScrolling != _shownScrolling);
+            object id = MatchIdOf(node, out var from);
+            return scrollBehind || !object.Equals(id, _shownId) || from != _shownIdFrom;
         }
 
         // In play mode, how far a scroll container is scrolled, how far it can be and whether it is scrolling, read only
-        // (the system owns them), under its axis. What a repaint shows is noted for RequiresConstantRepaint; another
-        // event reads the same values but shows nothing, so noting them then would hide that the screen is behind.
+        // (the system owns them), under its axis. Whether it is a scroll container is settled from the node as it is,
+        // so a new axis picked in the popup shows or hides this from the next event on, once it has been applied, and
+        // the layout and repaint of one event always agree. What a repaint shows is noted for RequiresConstantRepaint;
+        // another event reads the same values but shows nothing, so noting them then would hide that the screen is
+        // behind.
         private void ScrollReadout()
         {
-            if (!ShowsReadout(out var node)) return;
+            if (!ShowsReadouts(out var node) || node.Scroll == ScrollAxis.None) return;
 
             var offset = node.ScrollOffset;
             var range = node.ScrollRange;
@@ -138,15 +164,53 @@ namespace TimboJimboEditor.UI.Layout
             EditorGUI.indentLevel--;
         }
 
-        // Whether the scroll readout shows: in play mode, for one enabled scroll container at a time (several scrolled
-        // differently have no one value to show). Settled from the node as it is, so a new axis picked in the popup
-        // shows or hides it from the next event on, once it has been applied, and the layout and repaint of one event
-        // always agree.
-        private bool ShowsReadout(out LayoutNode node)
+        // In play mode, the id it is matched by, read only (it is set in code and never saved), under its match name: its
+        // own, the one it inherits with the node that comes from, or none. What a repaint shows is noted as the scroll
+        // readout's is.
+        private void MatchIdReadout()
+        {
+            if (!ShowsReadouts(out var node)) return;
+
+            object id = MatchIdOf(node, out var from);
+            if (Event.current.type == EventType.Repaint)
+            {
+                _shownId = id;
+                _shownIdFrom = from;
+            }
+
+            string text = id == null ? "none" : from == null ? id.ToString() : $"{id} (from {from.name})";
+            EditorGUI.indentLevel++;
+            using (new EditorGUI.DisabledScope(true))
+                EditorGUILayout.TextField(s_matchIdLabel, text);
+            EditorGUI.indentLevel--;
+        }
+
+        // The id the layout system matches the node by: its own, or when that is null the nearest one set on an enabled
+        // node above it, through any plain objects in between (so a root takes it from the node it is mounted under);
+        // null when none is. Worked out here from the public ids, since the one the system keeps is internal. from is
+        // the node it comes from, null when it is its own.
+        private static object MatchIdOf(LayoutNode node, out LayoutNode from)
+        {
+            from = null;
+            if (node.MatchId != null) return node.MatchId;
+
+            for (var above = node.transform.parent; above != null; above = above.parent)
+            {
+                if (above.TryGetComponent(out LayoutNode aboveNode) && aboveNode.isActiveAndEnabled && aboveNode.MatchId != null)
+                {
+                    from = aboveNode;
+                    return aboveNode.MatchId;
+                }
+            }
+            return null;
+        }
+
+        // Whether the readouts show: in play mode, for one enabled node at a time (several scrolled differently, or
+        // matched by different ids, have no one value to show).
+        private bool ShowsReadouts(out LayoutNode node)
         {
             node = target as LayoutNode;
-            return Application.isPlaying && targets.Length == 1 && node != null && node.isActiveAndEnabled
-                && node.Scroll != ScrollAxis.None;
+            return Application.isPlaying && targets.Length == 1 && node != null && node.isActiveAndEnabled;
         }
 
         private static void Header(string title)

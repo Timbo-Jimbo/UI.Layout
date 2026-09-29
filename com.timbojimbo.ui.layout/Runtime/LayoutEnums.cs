@@ -56,6 +56,28 @@ namespace TimboJimbo.UI.Layout
         None,
     }
 
+    /// <summary>
+    /// The side a node slides past as it disappears, and in from as it appears (<see cref="DisplayEffect.Edge"/>): just
+    /// clearing its parent's rect as drawn, so it goes out of view where something clips at that edge.
+    /// </summary>
+    public enum DisplayEdge
+    {
+        /// <summary>It does not slide.</summary>
+        None,
+
+        /// <summary>Past its parent's left edge.</summary>
+        Left,
+
+        /// <summary>Past its parent's right edge.</summary>
+        Right,
+
+        /// <summary>Past its parent's top edge.</summary>
+        Top,
+
+        /// <summary>Past its parent's bottom edge.</summary>
+        Bottom,
+    }
+
     /// <summary>What a floating node is placed against, rather than in its parent's flow.</summary>
     public enum FloatingAttach
     {
