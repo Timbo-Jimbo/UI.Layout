@@ -5,9 +5,9 @@ namespace TimboJimbo.UI.Layout
 {
     /// <summary>
     /// A node of a layout, as Clay's elements: sized along each axis (fit, grow, fixed or percent), padded, laying its
-    /// children out one way with a gap between and aligned, or floating against its parent, its root or another node
-    /// in its tree. A node whose parent is not a node is a root: it keeps the rect it is given, and lays its children
-    /// out inside it.
+    /// children out one way with a gap between and aligned (in one line, or wrapped into lines or a grid), or floating
+    /// against its parent, its root or another node in its tree. A node whose parent is not a node is a root: it keeps
+    /// the rect it is given, and lays its children out inside it, clear of the screen's safe area.
     /// The layout system owns every other node's RectTransform (anchors, pivot, position, size and scale): change
     /// where a node goes through its layout, and how it is drawn apart from that, taking no space, by
     /// <see cref="Offset"/>, <see cref="Scale"/> and <see cref="Opacity"/>. A change made in
@@ -30,11 +30,20 @@ namespace TimboJimbo.UI.Layout
         [Tooltip("Space between its edges and its children or content.")]
         [SerializeField] private Insets _padding;
 
-        [Tooltip("Space between one child and the next.")]
+        [Tooltip("A root's: the edges it keeps its content clear of the screen's notch, rounded corners and home bar on, adding as much of that as it covers to its padding, as SwiftUI keeps views in the safe area. Its own background still fills its rect.")]
+        [SerializeField] private Edges _safeArea = Edges.All;
+
+        [Tooltip("The edges it reaches out to the screen's edge on where it lies against the safe area, its padding growing by as much so what is inside stays clear, as SwiftUI's ignoresSafeArea: a bar's colour under the notch, a list scrolling under the home bar.")]
+        [SerializeField] private Edges _ignoresSafeArea;
+
+        [Tooltip("Space between one child and the next, and between one line and the next when they wrap.")]
         [SerializeField] private float _childGap;
 
         [Tooltip("Which way it lays its children out.")]
         [SerializeField] private LayoutDirection _direction;
+
+        [Tooltip("Whether its children wrap into lines: as they fill one (Lines), into lines of Count equal cells (Grid), or of as many cells at least Min Size long as fit (Adaptive). Lines stack across its direction.")]
+        [SerializeField] private Wrap _wrap;
 
         [Tooltip("Where its children sit across its width.")]
         [SerializeField] private AlignX _childAlignX;
@@ -96,11 +105,46 @@ namespace TimboJimbo.UI.Layout
         /// <summary>Space between its edges and its children or content.</summary>
         public Insets Padding { get => _padding; set { _padding = value; Changed(); } }
 
-        /// <summary>Space between one child and the next.</summary>
+        /// <summary>
+        /// A root's: the edges it keeps its content clear of the screen's unsafe area on (a notch, rounded corners, the
+        /// home bar: outside <see cref="Screen.safeArea"/>), as SwiftUI keeps views in the safe area; all of them by
+        /// default. It adds as much of that as it covers to its <see cref="Padding"/>, so a root away from the notch adds
+        /// nothing, and its own background (a Box on it) still fills its rect. Read every frame, so a rotation or the
+        /// Device Simulator's device is taken up at once. Only an outermost root keeps it (one inside another tree goes
+        /// by where that tree puts it), and not on a world space canvas. A node that should reach under it sets
+        /// <see cref="IgnoresSafeArea"/>. Unused on any other node.
+        /// </summary>
+        public Edges SafeArea { get => _safeArea; set { _safeArea = value; Changed(); } }
+
+        /// <summary>
+        /// The edges it reaches out past the safe area on, as SwiftUI's ignoresSafeArea: on each, where it lies against
+        /// the edge of its root's safe area (or past it), it reaches out to the root's edge, and its padding grows by as
+        /// much, so what is inside it stays where it was. A bar's colour goes under the notch while its title stays below
+        /// it; a list goes under the home bar, its rows scrolling on under it and coming to rest clear of it, with its
+        /// indicators, ScrollTo and snapping kept clear of it too, as a UIScrollView's insets are. Laid out further in
+        /// (padding or centring between it and that edge), it does not reach. A floating child of it is placed against
+        /// where it was laid out. A root does not reach: it keeps its rect.
+        /// </summary>
+        public Edges IgnoresSafeArea { get => _ignoresSafeArea; set { _ignoresSafeArea = value; Changed(); } }
+
+        /// <summary>Space between one child and the next, and between one line and the next when they wrap (<see cref="Wrap"/>).</summary>
         public float ChildGap { get => _childGap; set { _childGap = value; Changed(); } }
 
         /// <summary>Which way it lays its children out.</summary>
         public LayoutDirection Direction { get => _direction; set { _direction = value; Changed(); } }
+
+        /// <summary>
+        /// Whether its children wrap into lines, as CSS's flex-wrap and SwiftUI's lazy grids, the lines stacking across
+        /// its <see cref="Direction"/>, <see cref="ChildGap"/> apart. <see cref="Wrap.Lines"/>: a child that would run past
+        /// the end of a line starts the next, as text wraps; each line is then a row, its grow children taking what it has
+        /// left and <see cref="ChildAlignX"/> placing it, and fitted, the node is as wide as all of them on one line. A
+        /// <see cref="Wrap.Grid"/> of lines of Count equal cells, or <see cref="Wrap.Adaptive"/>, as many at least MinSize
+        /// long as fit: each child is sized in its cell by its own sizing (grow fills it). A line is as tall as its
+        /// tallest child, which ChildAlignY places it in; the lines as a block are placed by it too. Lines and Adaptive
+        /// wrap left to right only; nothing wraps along the way it scrolls. Changed inside
+        /// <see cref="LayoutSystem.Animate"/> (a new count, a new width), the children fly to their new places.
+        /// </summary>
+        public Wrap Wrap { get => _wrap; set { _wrap = value; Changed(); } }
 
         /// <summary>Where its children sit across its width.</summary>
         public AlignX ChildAlignX { get => _childAlignX; set { _childAlignX = value; Changed(); } }

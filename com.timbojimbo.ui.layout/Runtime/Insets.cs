@@ -30,5 +30,9 @@ namespace TimboJimbo.UI.Layout
 
         /// <summary>Top plus bottom.</summary>
         public float Vertical => Top + Bottom;
+
+        /// <summary>Each side of one plus the same side of the other.</summary>
+        public static Insets operator +(Insets a, Insets b) =>
+            new(a.Left + b.Left, a.Right + b.Right, a.Top + b.Top, a.Bottom + b.Bottom);
     }
 }

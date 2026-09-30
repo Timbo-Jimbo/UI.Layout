@@ -120,6 +120,15 @@ namespace TimboJimbo.UI.Layout
         // LayoutNode children are drawn moved by that offset. Null for a node that never has.
         public ScrollState Scroll;
 
+        // Where the last pass that laid it out put it, beyond its rect: how far it reaches past where it was laid out on
+        // each side, out to its root's edge (IgnoresSafeArea), which is part of its padding now (for a root, the safe area
+        // it keeps its content clear of, added to its padding); which of its parent's lines it is in (0 unless its parent
+        // wraps its children); and how many lines its own flow runs to (1 unless it wraps). Kept while it is out of
+        // layout. What it scrolls comes to rest, snaps and shows its indicators clear of its reach.
+        public Insets Reach;
+        public int Line;
+        public int Lines;
+
         // Its drag owner (an ILayoutDraggable on its object) as the last pass found it, looked up each pass as its content
         // is, so one added or removed is met with the next frame; null for none. It takes part in drags only while it is
         // enabled.

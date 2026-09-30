@@ -1,6 +1,6 @@
 # UI Layout
 
-Layout and motion for UGUI in one system, modelled on [Clay](https://github.com/nicbarker/clay) and moved like SwiftUI. A layout pass says where every node goes; nodes get there on springs, from where they are drawn and at the velocity they have. On top of that: show and hide effects, matched names that fly between places, and scrolling with nested drags, paging and indicators.
+Layout and motion for UGUI in one system, modelled on [Clay](https://github.com/nicbarker/clay) and moved like SwiftUI. A layout pass says where every node goes; nodes get there on springs, from where they are drawn and at the velocity they have. On top of that: wrapping and grids, the safe area, show and hide effects, matched names that fly between places, and scrolling with nested drags, paging and indicators.
 
 Requires Unity 6000.0 or later, `com.unity.ugui` 2.0.0 and `com.timbojimbo.core`.
 
@@ -19,10 +19,22 @@ row.ChildAlignY = AlignY.Center;
 ```
 
 - **Sizing** per axis: `Fit` (its content, with an optional min and max), `Grow` (a share of what is left), `Fixed`, or `Percent` of its parent. `AspectRatio` sets the height from the width.
+- **Wrap** breaks the children into lines, `ChildGap` apart, as CSS's flex-wrap and SwiftUI's lazy grids: `Wrap.Lines` as text wraps (tags), `Wrap.Grid(3)` in lines of three equal cells, `Wrap.Adaptive(120f)` in as many cells at least 120 long as fit. Lines and Adaptive wrap left to right; a Grid either way (a shelf of two rows that scrolls sideways).
 - **Content**: a component on the node implementing `ILayoutMeasurable` is its content (a text, a picture), measured at the width it gets and told the size it is going to.
 - **Floating** takes a node out of the flow and places it against its parent, its root, or any other node in its tree (`FloatingAttach.Element`), following that node as it moves and scrolls.
 - **Display**: `Hidden` keeps a node's space, `None` takes it out of layout.
 - **Offset**, **Scale** and **Opacity** move, scale and fade a node without taking space, for gestures.
+
+## Safe area
+
+As in SwiftUI, a root keeps its content clear of the notch, rounded corners and home bar (`Screen.safeArea`) on the edges its `SafeArea` names, all of them by default, adding as much as it covers to its padding; its own background still fills the screen. A node with `IgnoresSafeArea` reaches back out to the screen's edge where it lies against the safe area, its padding growing by as much, so what is inside stays clear:
+
+```csharp
+header.IgnoresSafeArea = Edges.Top | Edges.Left | Edges.Right; // its colour under the notch, its title below it
+list.IgnoresSafeArea = Edges.Bottom;                            // rows scroll under the home bar, and rest above it
+```
+
+A node floating against the root sits inside the safe area. The Game view's safe area is the whole screen: the Simulator shows a phone's.
 
 ## Motion
 

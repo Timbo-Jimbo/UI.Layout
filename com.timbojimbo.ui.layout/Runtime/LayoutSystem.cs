@@ -21,6 +21,13 @@ namespace TimboJimbo.UI.Layout
         // Animate lays out before and after its update, and what the update changed sets off on springs. In edit mode
         // nothing animates.
         //
+        // An outermost root keeps its content clear of the screen's safe area on the edges its SafeArea names, read
+        // each pass: the solver adds the part of the unsafe area it covers to its padding. A node ignoring the safe area
+        // on an edge (IgnoresSafeArea) reaches back out past it to the root's edge where it lies against it, its padding
+        // growing by as much, so what is inside stays clear. That reach (a root's being its safe area) is kept on the
+        // node, and what it scrolls comes to rest, snaps and draws its indicators clear of it, as a UIScrollView adjusts
+        // its insets for the safe area.
+        //
         // A node whose Scroll is not None is a scroll container, as a Clay scroll container or a UIScrollView: the
         // solver lets its children run past its edge the ways it scrolls, a RectMask2D clips them, and its LayoutNode
         // children (in its flow or floating) are drawn moved together by its scroll offset. The offset only moves
@@ -571,7 +578,7 @@ namespace TimboJimbo.UI.Layout
                 && TryScrollRect(state, descendant, out var min, out var max))
             {
                 ClearRequest(scroll);
-                if (TryScrollOffset(scroll, kind, anchor, min, max, out var offset))
+                if (TryScrollOffset(scroll, state.Reach, kind, anchor, min, max, out var offset))
                 {
                     StopScrollAt(scroll, offset);
                     FlushIfIdle();
@@ -764,10 +771,11 @@ namespace TimboJimbo.UI.Layout
             }
         }
 
-        // Solves one tree, in its root's rect, and places each of its nodes; then, the whole tree placed (a ScrollTo
-        // reads where its descendant goes), each scroll container in it takes up its new range and what was asked of it.
-        // Last, a flight no longer shown drops out and a follower shown again stops following, bar in a change's own
-        // pass, where that waits for the change's pairs to form and its flights to board (Animate).
+        // Solves one tree, in its root's rect, its content kept clear of the safe area, and places each of its nodes;
+        // then, the whole tree placed (a ScrollTo reads where its descendant goes), each scroll container in it takes up
+        // its new range and what was asked of it. Last, a flight no longer shown drops out and a follower shown again
+        // stops following, bar in a change's own pass, where that waits for the change's pairs to form and its flights to
+        // board (Animate).
         private static void LayOut(NodeState root, LayoutTransition transition)
         {
             s_visit.Clear();
@@ -776,7 +784,7 @@ namespace TimboJimbo.UI.Layout
             if (s_count > 0)
             {
                 bool attached = FindElements(root);
-                LayoutSolver.Solve(s_solver, s_count, root.RectTransform.rect.size);
+                LayoutSolver.Solve(s_solver, s_count, root.RectTransform.rect.size, SafeAreaOf(root));
                 if (attached)
                     WarnCircular();
             }
@@ -790,6 +798,49 @@ namespace TimboJimbo.UI.Layout
             }
             if (transition == null)
                 DropOut(null);
+        }
+
+        // How far a root keeps its content in from each edge its SafeArea names, in its units, so that it is clear of the
+        // screen's unsafe area (outside Screen.safeArea: a notch, rounded corners, the home bar), as UIKit's safe area
+        // insets are: from its edge to where the safe area starts, on a side where the screen has something unsafe, and
+        // nothing elsewhere. Only an outermost root keeps it: one inside another tree (under a plain object in a node) is
+        // where that tree put it, which kept clear of it or chose not to. Nothing on a world space canvas, or on none.
+        // Read every pass, as Unity says nothing when it changes (a rotation, the simulator's device).
+        private static Insets SafeAreaOf(NodeState root)
+        {
+            var edges = root.Node.SafeArea;
+            if (edges == Edges.None || root.Above != null) return default;
+            var area = Screen.safeArea;
+            bool left = area.xMin > 0.5f, right = area.xMax < Screen.width - 0.5f;
+            bool bottom = area.yMin > 0.5f, top = area.yMax < Screen.height - 0.5f;
+            if (!left && !right && !bottom && !top) return default;
+
+            var rt = root.RectTransform;
+            var canvas = rt.GetComponentInParent<Canvas>();
+            if (canvas == null) return default;
+            canvas = canvas.rootCanvas;
+            if (canvas.renderMode == RenderMode.WorldSpace) return default;
+            var camera = canvas.renderMode == RenderMode.ScreenSpaceCamera ? canvas.worldCamera : null;
+
+            // Its rect on screen, in pixels (y up), and how many of its units a pixel is each way.
+            rt.GetWorldCorners(s_corners);
+            var min = RectTransformUtility.WorldToScreenPoint(camera, s_corners[0]);
+            var max = RectTransformUtility.WorldToScreenPoint(camera, s_corners[2]);
+            var pixels = max - min;
+            if (pixels.x <= 0f || pixels.y <= 0f) return default;
+            var size = rt.rect.size;
+            var unit = new Vector2(size.x / pixels.x, size.y / pixels.y);
+
+            var safe = default(Insets);
+            if (left && (edges & Edges.Left) != 0)
+                safe.Left = Mathf.Clamp(area.xMin - min.x, 0f, pixels.x) * unit.x;
+            if (right && (edges & Edges.Right) != 0)
+                safe.Right = Mathf.Clamp(max.x - area.xMax, 0f, pixels.x) * unit.x;
+            if (bottom && (edges & Edges.Bottom) != 0)
+                safe.Bottom = Mathf.Clamp(area.yMin - min.y, 0f, pixels.y) * unit.y;
+            if (top && (edges & Edges.Top) != 0)
+                safe.Top = Mathf.Clamp(max.y - area.yMax, 0f, pixels.y) * unit.y;
+            return safe;
         }
 
         // Adds a node and everything under it to the pass, in pre-order: to the solver while it and everything above
@@ -846,11 +897,13 @@ namespace TimboJimbo.UI.Layout
                     Padding = node.Padding,
                     ChildGap = node.ChildGap,
                     Direction = node.Direction,
+                    Wrap = node.Wrap,
                     AlignX = node.ChildAlignX,
                     AlignY = node.ChildAlignY,
                     AspectRatio = node.AspectRatio,
                     Floating = node.Floating,
                     Element = -1,
+                    Ignores = node.IgnoresSafeArea,
                     Scroll = node.Scroll,
                     Content = content,
                 };
@@ -951,6 +1004,13 @@ namespace TimboJimbo.UI.Layout
         {
             var node = state.Node;
             var parent = state.PassParent;
+            if (state.PassIndex >= 0)
+            {
+                ref var solved = ref s_solver[state.PassIndex];
+                state.Reach = solved.Reach;
+                state.Line = solved.Line;
+                state.Lines = solved.Lines;
+            }
             bool visible = node.Display == DisplayMode.Visible;
             var shown = new Vector2(visible ? 1f : 0f, 0f);
             var opacity = new Vector2(OpacityTargetOf(state), 0f);
@@ -1870,7 +1930,7 @@ namespace TimboJimbo.UI.Layout
                     WarnScrollTo(state.Node, descendant, kind);
                 return false;
             }
-            else if (!TryScrollOffset(scroll, kind, anchor, min, max, out offset))
+            else if (!TryScrollOffset(scroll, state.Reach, kind, anchor, min, max, out offset))
             {
                 return false;
             }
@@ -1905,9 +1965,10 @@ namespace TimboJimbo.UI.Layout
 
         // How far the rect a ScrollTo lines up runs past `target`'s own on one side of one axis (0 is x, 1 is y; `end`
         // the right or bottom side, otherwise the left or top): CSS's scroll-margin, worked out from the layout. Along
-        // its parent's direction, a neighbour in the flow on that side puts the gap between them there, and that is
-        // all, so the neighbour's edge meets the view's and no sliver of it shows. With no neighbour there, or across
-        // its parent's direction (where it has none), its parent's padding; and while that takes it to its parent's
+        // its parent's direction, a neighbour in the flow on that side (in its line, when its parent wraps) puts the gap
+        // between them there, and that is all, so the neighbour's edge meets the view's and no sliver of it shows; across
+        // it, so does another line on that side, when its parent wraps. With no neighbour there, its parent's padding
+        // (and what its parent reaches past the safe area, which is padding too); and while that takes it to its parent's
         // edge, the space around its parent there too, on up to the container, whose padding is where its content
         // starts and ends. One aligned in from its parent's edge stops at the padding, the space around its parent
         // being further off. A floating node is out of the flow: it adds nothing, and nothing above it counts. The
@@ -1924,9 +1985,9 @@ namespace TimboJimbo.UI.Layout
                 var parent = state.Parent;
                 var layout = parent.Node;
                 bool along = (layout.Direction == LayoutDirection.LeftToRight) == (axis == 0);
-                if (along && HasFlowNeighbour(parent, state, end))
+                if (along ? HasFlowNeighbour(parent, state, end) : end ? state.Line < parent.Lines - 1 : state.Line > 0)
                     return margin + layout.ChildGap;
-                var padding = layout.Padding;
+                var padding = layout.Padding + parent.Reach;
                 float inset = axis == 0 ? (end ? padding.Right : padding.Left) : (end ? padding.Bottom : padding.Top);
                 margin += inset;
                 if (parent == container) return margin;
@@ -1939,9 +2000,10 @@ namespace TimboJimbo.UI.Layout
             }
         }
 
-        // Whether `child` has a neighbour in `parent`'s flow after it (`after`) or before it: a sibling node the last
-        // pass laid out there, Hidden ones included, as they keep their space. One out of layout (inactive, disabled or
-        // Display None, a node on its way out included, having left already) or floating is not in the flow.
+        // Whether `child` has a neighbour in `parent`'s flow after it (`after`) or before it, in the same line when the
+        // parent wraps its children: a sibling node the last pass laid out there, Hidden ones included, as they keep
+        // their space. One out of layout (inactive, disabled or Display None, a node on its way out included, having left
+        // already) or floating is not in the flow.
         private static bool HasFlowNeighbour(NodeState parent, NodeState child, bool after)
         {
             var transform = parent.RectTransform;
@@ -1951,26 +2013,29 @@ namespace TimboJimbo.UI.Layout
                 if (transform.GetChild(i).TryGetComponent(out LayoutNode sibling) && sibling.isActiveAndEnabled
                     && s_states.TryGetValue(sibling, out var state) && state.Seen && state.PassIndex >= 0
                     && !sibling.Floating.IsFloating)
-                    return true;
+                    return state.Line == child.Line;
             }
             return false;
         }
 
         // Where a container scrolls to for the rect from `min` to `max` in its content (TryScrollRect), on each axis it
-        // scrolls. A ScrollTo (`kind` To): the rect's start less `anchor` of the room around it (what it shows less the
-        // rect), within range, as it was for the descendant alone. A ScrollIntoView, as CSS's 'nearest': only the axes
-        // on which the rect is not wholly in view from where the container rests (where it is, or where it springs to),
-        // give or take its rest distance, move, lining its start up with the view's start when it runs past the start,
-        // and its end with the view's end when it runs past the end; for a rect bigger than the view, the other way
-        // round, the least move that fills the view with it. One running past both edges already fills it and stays.
-        // False for a ScrollIntoView that finds nothing to move, which leaves the container as it is, gliding or held
-        // by a press included.
-        private static bool TryScrollOffset(ScrollState scroll, ScrollRequest kind, float anchor, Vector2 min, Vector2 max, out Vector2 offset)
+        // scrolls. What it shows, here, is its rect less its `reach` (the safe area it reaches under), as UIKit lines
+        // things up within a scroll view's adjusted content insets. A ScrollTo (`kind` To): the rect's start less `anchor`
+        // of the room around it (what it shows less the rect), within range, as it was for the descendant alone. A
+        // ScrollIntoView, as CSS's 'nearest': only the axes on which the rect is not wholly in view from where the
+        // container rests (where it is, or where it springs to), give or take its rest distance, move, lining its start up
+        // with the view's start when it runs past the start, and its end with the view's end when it runs past the end;
+        // for a rect bigger than the view, the other way round, the least move that fills the view with it. One running
+        // past both edges already fills it and stays. False for a ScrollIntoView that finds nothing to move, which leaves
+        // the container as it is, gliding or held by a press included.
+        private static bool TryScrollOffset(ScrollState scroll, Insets reach, ScrollRequest kind, float anchor, Vector2 min, Vector2 max,
+            out Vector2 offset)
         {
-            var viewport = scroll.Viewport;
+            var lead = new Vector2(reach.Left, reach.Top);
+            var viewport = scroll.Viewport - lead - new Vector2(reach.Right, reach.Bottom);
             if (kind != ScrollRequest.IntoView)
             {
-                offset = scroll.Clamp(min - anchor * (viewport - (max - min)));
+                offset = scroll.Clamp(min - lead - anchor * (viewport - (max - min)));
                 return true;
             }
 
@@ -1980,11 +2045,12 @@ namespace TimboJimbo.UI.Layout
             for (int axis = 0; axis < 2; axis++)
             {
                 if (!scroll.Scrolls(axis)) continue;
-                bool before = min[axis] < resting[axis] - ScrollState.Rest;
-                bool past = max[axis] > resting[axis] + viewport[axis] + ScrollState.Rest;
+                float view = resting[axis] + lead[axis];
+                bool before = min[axis] < view - ScrollState.Rest;
+                bool past = max[axis] > view + viewport[axis] + ScrollState.Rest;
                 if (before == past) continue;
                 bool bigger = max[axis] - min[axis] > viewport[axis];
-                offset[axis] = before != bigger ? min[axis] : max[axis] - viewport[axis];
+                offset[axis] = (before != bigger ? min[axis] : max[axis] - viewport[axis]) - lead[axis];
                 moves = true;
             }
             if (!moves) return false;
@@ -2225,8 +2291,8 @@ namespace TimboJimbo.UI.Layout
 
         // The offsets a container that snaps rests at along one axis (0 is x, 1 is y), in order, into `points`: its start,
         // its end, and between them each whole page of what it shows (Pages), or where each child in its flow (laid out,
-        // not floating) starts less its padding there, which lines that child up where its content starts (Children),
-        // from the targets the last pass gave, a child's own Offset left out.
+        // not floating) starts less its padding there (with what it reaches past the safe area), which lines that child
+        // up where its content starts (Children), from the targets the last pass gave, a child's own Offset left out.
         private static void SnapPoints(NodeState state, int axis, List<float> points)
         {
             var scroll = state.Scroll;
@@ -2245,7 +2311,8 @@ namespace TimboJimbo.UI.Layout
             }
             else
             {
-                float padding = axis == 0 ? node.Padding.Left : node.Padding.Top;
+                var inset = node.Padding + state.Reach;
+                float padding = axis == 0 ? inset.Left : inset.Top;
                 var transform = state.RectTransform;
                 for (int i = 0; i < transform.childCount; i++)
                 {
@@ -2285,8 +2352,9 @@ namespace TimboJimbo.UI.Layout
         // container, and fades out once it has been still for IndicatorHold. It is as long against its track as what the
         // container shows is against what it scrolls, as far along as it is scrolled, and shorter by as far as it is
         // drawn past an end, staying at that end. Its track runs along the container's right edge (y) or bottom edge (x)
-        // as drawn this frame, short of the corners, and of the other's track while both show. None shows outside play
-        // mode, with ShowsScrollIndicators off, or on an axis it cannot scroll along (its content fits).
+        // as drawn this frame, short of the corners, and of the other's track while both show, and clear of the safe area
+        // the container reaches under (Reach), as iOS insets its indicators by it. None shows outside play mode, with
+        // ShowsScrollIndicators off, or on an axis it cannot scroll along (its content fits).
         private static void DrawIndicators(NodeState state, bool playing, float dt)
         {
             var scroll = state.Scroll;
@@ -2295,6 +2363,7 @@ namespace TimboJimbo.UI.Layout
             bool x = shows && scroll.Scrolls(0) && scroll.Range.x > 0f;
             bool y = shows && scroll.Scrolls(1) && scroll.Range.y > 0f;
             var size = state.Parent != null ? Vector2.Max(state.Size.Value, Vector2.zero) : state.RectTransform.rect.size;
+            var reach = state.Reach;
             var at = scroll.Offset.Value;
             for (int axis = 0; axis < 2; axis++)
             {
@@ -2322,8 +2391,13 @@ namespace TimboJimbo.UI.Layout
                 }
                 scroll.IndicatorShown[axis] = shown;
 
+                // The safe area it reaches under at the start and end of the track, and along the track's edge.
+                float lead = axis == 0 ? reach.Left : reach.Top;
+                float trail = axis == 0 ? reach.Right : reach.Bottom;
+                float side = axis == 0 ? reach.Bottom : reach.Right;
                 float extent = size[axis];
-                float track = extent - 2f * IndicatorEnds - ((axis == 0 ? y : x) ? IndicatorThickness + IndicatorInset : 0f);
+                float track = extent - lead - trail - 2f * IndicatorEnds
+                    - ((axis == 0 ? y : x) ? IndicatorThickness + IndicatorInset : 0f);
                 if (shown <= 0f || track <= IndicatorThickness)
                 {
                     HideIndicator(indicator);
@@ -2359,8 +2433,8 @@ namespace TimboJimbo.UI.Layout
                 if (rt.anchorMax != corner) rt.anchorMax = corner;
                 if (rt.pivot != corner) rt.pivot = corner;
                 var position = axis == 1
-                    ? new Vector2(-IndicatorInset, -(IndicatorEnds + along))
-                    : new Vector2(IndicatorEnds + along, IndicatorInset);
+                    ? new Vector2(-(IndicatorInset + side), -(IndicatorEnds + lead + along))
+                    : new Vector2(IndicatorEnds + lead + along, IndicatorInset + side);
                 if (rt.anchoredPosition != position) rt.anchoredPosition = position;
                 var sized = axis == 1 ? new Vector2(IndicatorThickness, length) : new Vector2(length, IndicatorThickness);
                 if (rt.sizeDelta != sized) rt.sizeDelta = sized;

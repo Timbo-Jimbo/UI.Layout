@@ -1,3 +1,5 @@
+using System;
+
 namespace TimboJimbo.UI.Layout
 {
     /// <summary>How a node is sized along one axis, as Clay sizes an element.</summary>
@@ -25,6 +27,43 @@ namespace TimboJimbo.UI.Layout
     {
         LeftToRight,
         TopToBottom,
+    }
+
+    /// <summary>
+    /// Whether a node's children run on in one line or wrap into more (<see cref="Wrap"/>), as CSS's flex-wrap and
+    /// SwiftUI's lazy grids. Lines stack across the node's direction.
+    /// </summary>
+    public enum LayoutWrapMode
+    {
+        /// <summary>They run on in one line, as Clay's do.</summary>
+        None,
+
+        /// <summary>
+        /// A child that would run past the end of the line starts the next, each keeping its own size, as text wraps
+        /// words: tags, chips.
+        /// </summary>
+        Lines,
+
+        /// <summary>Lines of <see cref="Wrap.Count"/> equal cells, as SwiftUI's LazyVGrid with flexible columns.</summary>
+        Grid,
+
+        /// <summary>
+        /// Lines of as many equal cells at least <see cref="Wrap.MinSize"/> long as fit, stretched to fill the line, as
+        /// SwiftUI's adaptive grid items: more columns the wider it is.
+        /// </summary>
+        Adaptive,
+    }
+
+    /// <summary>A set of a rect's edges.</summary>
+    [Flags]
+    public enum Edges
+    {
+        None = 0,
+        Left = 1,
+        Right = 2,
+        Top = 4,
+        Bottom = 8,
+        All = Left | Right | Top | Bottom,
     }
 
     /// <summary>Where a node's children sit across its width.</summary>

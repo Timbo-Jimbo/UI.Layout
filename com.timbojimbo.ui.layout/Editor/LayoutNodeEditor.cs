@@ -7,14 +7,16 @@ namespace TimboJimboEditor.UI.Layout
 {
     /// <summary>
     /// Inspector for <see cref="LayoutNode"/>, its settings grouped the way they read: whether it shows, its size, how
-    /// it lays out what is inside it, which way it scrolls that, which end it keeps to, where it comes to rest and
-    /// whether it shows indicators, where and how it is drawn apart from that (floating, moved by its offset, scaled and
-    /// faded), then how it moves: its animation, how it appears and disappears, and the name it is matched by. What does
-    /// not apply is hidden: its height while its aspect ratio sets it from its width, its scroll anchor, snap and
-    /// indicators while it does not scroll, the indicators' colour while it shows none, and, through their drawers, a
-    /// sizing's value but for fixed and percent, a floating's placement but while it floats, and its element but while it
-    /// floats against one. In play mode a scroll container also shows, read only, how far it is scrolled, how far it can be,
-    /// and whether it is scrolling, and every node the id it is matched by.
+    /// it lays out what is inside it (and the safe area it keeps clear of, or reaches past), which way it scrolls that,
+    /// which end it keeps to, where it comes to rest and whether it shows indicators, where and how it is drawn apart from
+    /// that (floating, moved by its offset, scaled and faded), then how it moves: its animation, how it appears and
+    /// disappears, and the name it is matched by. What does not apply is hidden: its height while its aspect ratio sets
+    /// it from its width, the safe area a root keeps on any other node and the one a node reaches past on a root, its
+    /// scroll anchor, snap and indicators while it does not scroll, the indicators' colour while it shows none, and,
+    /// through their drawers, a sizing's value but for fixed and percent, a wrap's count but for a grid and its min size
+    /// but for an adaptive one, a floating's placement but while it floats, and its element but while it floats against
+    /// one. In play mode a scroll container also shows, read only, how far it is scrolled, how far it can be, and whether
+    /// it is scrolling, and every node the id it is matched by.
     /// </summary>
     [CustomEditor(typeof(LayoutNode))]
     [CanEditMultipleObjects]
@@ -34,8 +36,11 @@ namespace TimboJimboEditor.UI.Layout
         private SerializedProperty _aspectRatio;
         private SerializedProperty _height;
         private SerializedProperty _padding;
+        private SerializedProperty _safeArea;
+        private SerializedProperty _ignoresSafeArea;
         private SerializedProperty _childGap;
         private SerializedProperty _direction;
+        private SerializedProperty _wrap;
         private SerializedProperty _childAlignX;
         private SerializedProperty _childAlignY;
         private SerializedProperty _scroll;
@@ -73,8 +78,11 @@ namespace TimboJimboEditor.UI.Layout
             _aspectRatio = serializedObject.FindProperty("_aspectRatio");
             _height = serializedObject.FindProperty("_height");
             _padding = serializedObject.FindProperty("_padding");
+            _safeArea = serializedObject.FindProperty("_safeArea");
+            _ignoresSafeArea = serializedObject.FindProperty("_ignoresSafeArea");
             _childGap = serializedObject.FindProperty("_childGap");
             _direction = serializedObject.FindProperty("_direction");
+            _wrap = serializedObject.FindProperty("_wrap");
             _childAlignX = serializedObject.FindProperty("_childAlignX");
             _childAlignY = serializedObject.FindProperty("_childAlignY");
             _scroll = serializedObject.FindProperty("_scroll");
@@ -113,8 +121,16 @@ namespace TimboJimboEditor.UI.Layout
 
             Header("Content");
             EditorGUILayout.PropertyField(_padding);
+            // A root keeps its content clear of the safe area, and any other node can reach out past it: only the one
+            // that applies shows, both while roots and other nodes are edited together.
+            Kinds(out bool roots, out bool others);
+            if (roots)
+                EditorGUILayout.PropertyField(_safeArea);
+            if (others)
+                EditorGUILayout.PropertyField(_ignoresSafeArea);
             EditorGUILayout.PropertyField(_childGap);
             EditorGUILayout.PropertyField(_direction);
+            EditorGUILayout.PropertyField(_wrap);
             EditorGUILayout.PropertyField(_childAlignX);
             EditorGUILayout.PropertyField(_childAlignY);
 
@@ -231,6 +247,19 @@ namespace TimboJimboEditor.UI.Layout
                 }
             }
             return null;
+        }
+
+        // Whether any node being edited is a root, and whether any is not.
+        private void Kinds(out bool roots, out bool others)
+        {
+            roots = others = false;
+            foreach (var edited in targets)
+            {
+                if (edited is LayoutNode node && node.IsRoot)
+                    roots = true;
+                else
+                    others = true;
+            }
         }
 
         // Whether the readouts show: in play mode, for one enabled node at a time (several scrolled differently, or
