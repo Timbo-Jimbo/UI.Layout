@@ -78,6 +78,15 @@ namespace TimboJimbo.UI.Layout
         [Tooltip("Which end it keeps to as what it scrolls grows. End: it starts at its end and, while it is there, stays there as its content grows, as a chat does.")]
         [SerializeField] private ScrollAnchor _scrollAnchor;
 
+        [Tooltip("Where it comes to rest once a drag or a flick lets go: anywhere, on a whole page of what it shows, or with one of its children lined up where its content starts. A flick moves it on one page or child at most.")]
+        [SerializeField] private ScrollSnap _scrollSnap;
+
+        [Tooltip("Whether it shows a thin bar along each edge it scrolls by while it scrolls, fading out once it stops, as iOS's scroll indicators.")]
+        [SerializeField] private bool _showsScrollIndicators = true;
+
+        [Tooltip("The colour of its scroll indicators.")]
+        [SerializeField] private Color _scrollIndicatorColor = new(0.5f, 0.5f, 0.5f, 0.6f);
+
         /// <summary>How wide it is.</summary>
         public Sizing Width { get => _width; set { _width = value; Changed(); } }
 
@@ -189,6 +198,29 @@ namespace TimboJimbo.UI.Layout
         /// <see cref="ScrollIntoView"/> that moves it. Only play mode scrolls.
         /// </summary>
         public ScrollAnchor ScrollAnchor { get => _scrollAnchor; set { _scrollAnchor = value; Changed(); } }
+
+        /// <summary>
+        /// Where it comes to rest once a drag or a flick lets go of it, as UIKit's paging and SwiftUI's scroll target
+        /// behaviours: anywhere (None), on a whole page of what it shows (Pages), or with one of its children in its
+        /// flow starting where its content starts, inside its padding (Children). Let go, it settles on the page or
+        /// child nearest where it is drawn, or, flicked, on the next one the way it was flicked and no further, on a
+        /// quick spring that carries its speed without swinging past; a glide handed on to it from a list inside it
+        /// moves it on one too, and a wheel notch one. Either end is a place to rest as well. <see cref="ScrollTo"/>,
+        /// <see cref="ScrollIntoView"/> and <see cref="ScrollOffset"/> go exactly where they are told.
+        /// </summary>
+        public ScrollSnap ScrollSnap { get => _scrollSnap; set { _scrollSnap = value; Changed(); } }
+
+        /// <summary>
+        /// Whether it shows its scroll indicators, as iOS does by default (true): a thin rounded bar along its right edge
+        /// for scrolling up and down, and one along its bottom edge for scrolling sideways, as long against the edge as
+        /// what it shows is against what it scrolls, as far along as it is scrolled, and shortening as it rubber-bands.
+        /// Each shows while its axis scrolls or a press holds it, and fades out once it has been still for half a second.
+        /// They take no pointer, and only play mode scrolls.
+        /// </summary>
+        public bool ShowsScrollIndicators { get => _showsScrollIndicators; set { _showsScrollIndicators = value; Changed(); } }
+
+        /// <summary>The colour of its scroll indicators: by default a grey that reads on light and dark alike.</summary>
+        public Color ScrollIndicatorColor { get => _scrollIndicatorColor; set { _scrollIndicatorColor = value; Changed(); } }
 
         /// <summary>
         /// How far its children are scrolled, x right and y down, from 0 (the start) to <see cref="ScrollRange"/>, as

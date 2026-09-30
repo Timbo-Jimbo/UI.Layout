@@ -30,10 +30,12 @@ namespace TimboJimbo.UI.Layout
         // (moved by its share of the drag, rubber-banding past the ends), gliding once flicked (at UIScrollView's
         // deceleration rate), or springing (back to an end, to a wheel's target, where ScrollTo, ScrollIntoView or
         // ScrollOffset sent it, or on to its end as its content grows under a ScrollAnchor of End, on the node's own
-        // spring inside Animate); it is stepped with the springs, once a frame in play mode. A LayoutScroller the system
-        // adds takes the pointer for it, and for a node with a drag owner (ILayoutDraggable: a sheet's height, a card's
-        // pull), and a drag is shared among the containers and owners up the hierarchy from the press (see Dragging). In
-        // edit mode the offset is always at the start.
+        // spring inside Animate); it is stepped with the springs, once a frame in play mode. One that snaps (ScrollSnap)
+        // springs to a page or a child rather than gliding when it is let go of. While it scrolls it draws thin indicators
+        // along its edges, on objects of their own inside it. A LayoutScroller the system adds takes the pointer for it,
+        // and for a node with a drag owner (ILayoutDraggable: a sheet's height, a card's pull), and a drag is shared among
+        // the containers and owners up the hierarchy from the press (see Dragging). In edit mode the offset is always at
+        // the start.
         //
         // A node floating against an element (Floating.Element, in the same tree) is sized and placed against the
         // element's laid-out rect by the solver; its target then also takes in how the element is drawn apart from it:
@@ -321,8 +323,8 @@ namespace TimboJimbo.UI.Layout
                     if (!state.Group.blocksRaycasts) state.Group.blocksRaycasts = true;
                 }
                 // Nor scrolled nor dragged: what it added stops clipping and taking the pointer (met again, it takes
-                // them back). A drag it was taking part in passes it over from now on; one whose LayoutScroller this
-                // was ends in the next frame.
+                // them back), and its indicators go. A drag it was taking part in passes it over from now on; one whose
+                // LayoutScroller this was ends in the next frame.
                 if (state.Scroller != null) state.Scroller.enabled = false;
                 var scroll = state.Scroll;
                 if (scroll != null)
@@ -335,6 +337,7 @@ namespace TimboJimbo.UI.Layout
                         s_scrolled.Remove(state);
                     }
                     if (scroll.Clip != null && IsHidden(scroll.Clip)) scroll.Clip.enabled = false;
+                    HideIndicators(scroll);
                 }
             }
             Changed(node);
@@ -1708,6 +1711,7 @@ namespace TimboJimbo.UI.Layout
             {
                 ClearRequest(scroll);
                 if (scroll.Clip != null && IsHidden(scroll.Clip) && scroll.Clip.enabled) scroll.Clip.enabled = false;
+                HideIndicators(scroll);
                 // Its children are drawn where they are laid out again: it is scrolled by nothing.
                 if (scroll.Raised != Vector2.zero) QueueScrolled(state);
                 return;
@@ -2084,15 +2088,22 @@ namespace TimboJimbo.UI.Layout
             scroll.Wheeling = false;
         }
 
-        // The press holding a scroll lets go of it at `velocity`: out of range it springs back to the end it is past (0.4
-        // seconds, no bounce), carrying that velocity; in range it glides on at it, to a stop, or on into an end, where it
-        // springs back, or stops for what is above it to take its speed (NotePassOn). Let go of at a standstill in range,
-        // it stays where it is.
+        // The press holding a scroll lets go of it at `velocity`. One that snaps (ScrollSnap) settles on the page or child
+        // it goes to (SettleSnap). Otherwise, out of range it springs back to the end it is past (0.4 seconds, no
+        // bounce), carrying that velocity; in range it glides on at it, to a stop, or on into an end, where it springs
+        // back, or stops for what is above it to take its speed (NotePassOn). Let go of at a standstill in range, it
+        // stays where it is.
         private static void LetGo(NodeState state, Vector2 velocity)
         {
             var scroll = state.Scroll;
             var spring = scroll.Offset;
             scroll.Press = null;
+            if (state.Node.ScrollSnap != ScrollSnap.None)
+            {
+                velocity = scroll.OnAxes(velocity);
+                SettleSnap(state, SnapTarget(state, spring.Value, velocity), velocity);
+                return;
+            }
             spring.Velocity = scroll.OnAxes(velocity);
             spring.Target = scroll.Clamp(spring.Value);
             spring.Omega = ScrollState.BounceOmega;
@@ -2110,7 +2121,8 @@ namespace TimboJimbo.UI.Layout
         // drag ends or its pointer comes up (EndDrag), or in the next frame when its LayoutScroller has gone. The press
         // itself is not read for whether it is over: the Input System's UI module shares one event among a mouse's
         // buttons and overwrites it every frame the mouse moves. Outside play mode it is at the start. A changed offset is
-        // queued for Scrolled.
+        // queued for Scrolled, and its indicators are drawn for where it is now, their fades moving on only in the frame's
+        // step.
         private static void StepScroll(NodeState state, bool playing, bool step, float dt)
         {
             var scroll = state.Scroll;
@@ -2129,6 +2141,273 @@ namespace TimboJimbo.UI.Layout
             }
             if (scroll.Offset.Value != scroll.Raised)
                 QueueScrolled(state);
+            DrawIndicators(state, playing, step ? dt : 0f);
+        }
+
+        // ── Snapping ─────────────────────────────────────────────────────────────
+
+        // Scratch: one axis's snap points, in order.
+        private static readonly List<float> s_snaps = new();
+
+        // A container that snaps (ScrollSnap), let go of or handed a glide at `velocity` (its units a second, the way its
+        // offset moves), settles on `target` (SnapTarget) on the spring it springs back from an end on, carrying that
+        // velocity, bar as much of it towards the target as would swing it past (more than omega times the way left, for
+        // a critically damped spring), so it never overshoots a page. It is Springing after; the caller holds its offset.
+        private static void SettleSnap(NodeState state, Vector2 target, Vector2 velocity)
+        {
+            var scroll = state.Scroll;
+            var spring = scroll.Offset;
+            spring.Target = target;
+            spring.Omega = ScrollState.BounceOmega;
+            spring.Zeta = 1f;
+            spring.Delay = 0f;
+            for (int axis = 0; axis < 2; axis++)
+            {
+                float way = target[axis] - spring.Value[axis], v = velocity[axis];
+                if (v * way > 0f)
+                    velocity[axis] = Mathf.Sign(way) * Mathf.Min(Mathf.Abs(v), spring.Omega * Mathf.Abs(way));
+            }
+            spring.Velocity = scroll.OnAxes(velocity);
+            scroll.GlideX = scroll.GlideY = false;
+            scroll.Wheeling = false;
+            scroll.Phase = ScrollPhase.Springing;
+        }
+
+        // Where a container that snaps settles from `from` (its offset as drawn) moving at `velocity`: on each axis it
+        // scrolls, the snap point nearest it (SnapPoints), or, going faster than ScrollState.SnapFlickSpeed, the first
+        // one past it the way it goes (the nearest when there is none that way), so a flick moves it on one page or child
+        // and no further, as UIKit's paging and SwiftUI's viewAligned on a phone do. Past either end, that end.
+        private static Vector2 SnapTarget(NodeState state, Vector2 from, Vector2 velocity)
+        {
+            var scroll = state.Scroll;
+            var target = scroll.Clamp(from);
+            for (int axis = 0; axis < 2; axis++)
+            {
+                if (!scroll.Scrolls(axis)) continue;
+                SnapPoints(state, axis, s_snaps);
+                float at = from[axis], v = velocity[axis];
+                float nearest = s_snaps[0];
+                for (int i = 1; i < s_snaps.Count; i++)
+                {
+                    if (Mathf.Abs(s_snaps[i] - at) < Mathf.Abs(nearest - at))
+                        nearest = s_snaps[i];
+                }
+                target[axis] = Mathf.Abs(v) >= ScrollState.SnapFlickSpeed && NextSnap(at, v, out float next) ? next : nearest;
+            }
+            s_snaps.Clear();
+            return target;
+        }
+
+        // The first snap point in s_snaps past `at` by more than the rest distance, the way `way` goes (by its sign).
+        private static bool NextSnap(float at, float way, out float next)
+        {
+            next = at;
+            if (way > 0f)
+            {
+                for (int i = 0; i < s_snaps.Count; i++)
+                {
+                    if (s_snaps[i] <= at + ScrollState.Rest) continue;
+                    next = s_snaps[i];
+                    return true;
+                }
+            }
+            else if (way < 0f)
+            {
+                for (int i = s_snaps.Count - 1; i >= 0; i--)
+                {
+                    if (s_snaps[i] >= at - ScrollState.Rest) continue;
+                    next = s_snaps[i];
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        // The offsets a container that snaps rests at along one axis (0 is x, 1 is y), in order, into `points`: its start,
+        // its end, and between them each whole page of what it shows (Pages), or where each child in its flow (laid out,
+        // not floating) starts less its padding there, which lines that child up where its content starts (Children),
+        // from the targets the last pass gave, a child's own Offset left out.
+        private static void SnapPoints(NodeState state, int axis, List<float> points)
+        {
+            var scroll = state.Scroll;
+            var node = state.Node;
+            float range = scroll.Range[axis];
+            points.Clear();
+            points.Add(0f);
+            if (node.ScrollSnap == ScrollSnap.Pages)
+            {
+                float page = scroll.Viewport[axis];
+                if (page > ScrollState.Rest)
+                {
+                    for (float at = page; at < range - ScrollState.Rest; at += page)
+                        points.Add(at);
+                }
+            }
+            else
+            {
+                float padding = axis == 0 ? node.Padding.Left : node.Padding.Top;
+                var transform = state.RectTransform;
+                for (int i = 0; i < transform.childCount; i++)
+                {
+                    if (!transform.GetChild(i).TryGetComponent(out LayoutNode child) || !child.isActiveAndEnabled
+                        || child.Floating.IsFloating || !s_states.TryGetValue(child, out var placed) || !placed.Seen
+                        || placed.PassIndex < 0)
+                        continue;
+                    float shift = axis == 0 ? child.Offset.x : -child.Offset.y;
+                    float at = placed.Position.Target[axis] - shift - placed.Size.Target[axis] * 0.5f - padding;
+                    if (at > ScrollState.Rest && at < range - ScrollState.Rest)
+                        points.Add(at);
+                }
+                points.Sort();
+            }
+            if (range > ScrollState.Rest)
+                points.Add(range);
+        }
+
+        // ── Indicators ───────────────────────────────────────────────────────────
+
+        // The indicators' shape, in the container's units: how thick each is, how far in from the edge it runs along,
+        // how far in from the container's corners its track stops, and how short it gets on its own (rubber-banding it
+        // gets shorter still, down to a dot as long as it is thick).
+        private const float IndicatorThickness = 5f;
+        private const float IndicatorInset = 3f;
+        private const float IndicatorEnds = 8f;
+        private const float IndicatorMinLength = 36f;
+
+        // How fast an indicator fades in and out (all the way in a tenth and a quarter of a second), and how long its axis
+        // stays still before it starts to fade out.
+        private const float IndicatorFadeIn = 10f;
+        private const float IndicatorFadeOut = 4f;
+        private const float IndicatorHold = 0.5f;
+
+        // Draws a scroll container's indicators where it is scrolled this frame (`dt` the time the frame stepped, 0 when
+        // it is laid out again), as UIScrollView's: each axis's shows while that axis moves or a press holds the
+        // container, and fades out once it has been still for IndicatorHold. It is as long against its track as what the
+        // container shows is against what it scrolls, as far along as it is scrolled, and shorter by as far as it is
+        // drawn past an end, staying at that end. Its track runs along the container's right edge (y) or bottom edge (x)
+        // as drawn this frame, short of the corners, and of the other's track while both show. None shows outside play
+        // mode, with ShowsScrollIndicators off, or on an axis it cannot scroll along (its content fits).
+        private static void DrawIndicators(NodeState state, bool playing, float dt)
+        {
+            var scroll = state.Scroll;
+            var node = state.Node;
+            bool shows = playing && node.ShowsScrollIndicators && scroll.Measured;
+            bool x = shows && scroll.Scrolls(0) && scroll.Range.x > 0f;
+            bool y = shows && scroll.Scrolls(1) && scroll.Range.y > 0f;
+            var size = state.Parent != null ? Vector2.Max(state.Size.Value, Vector2.zero) : state.RectTransform.rect.size;
+            var at = scroll.Offset.Value;
+            for (int axis = 0; axis < 2; axis++)
+            {
+                ref var indicator = ref (axis == 0 ? ref scroll.IndicatorX : ref scroll.IndicatorY);
+                bool moved = at[axis] != scroll.IndicatorAt[axis];
+                scroll.IndicatorAt[axis] = at[axis];
+                if (!(axis == 0 ? x : y))
+                {
+                    HideIndicator(indicator);
+                    scroll.IndicatorShown[axis] = 0f;
+                    continue;
+                }
+
+                float shown = scroll.IndicatorShown[axis];
+                if (moved || scroll.Phase == ScrollPhase.Dragging)
+                {
+                    scroll.IndicatorStill[axis] = 0f;
+                    shown = Mathf.Min(1f, shown + dt * IndicatorFadeIn);
+                }
+                else
+                {
+                    scroll.IndicatorStill[axis] += dt;
+                    if (scroll.IndicatorStill[axis] > IndicatorHold)
+                        shown = Mathf.Max(0f, shown - dt * IndicatorFadeOut);
+                }
+                scroll.IndicatorShown[axis] = shown;
+
+                float extent = size[axis];
+                float track = extent - 2f * IndicatorEnds - ((axis == 0 ? y : x) ? IndicatorThickness + IndicatorInset : 0f);
+                if (shown <= 0f || track <= IndicatorThickness)
+                {
+                    HideIndicator(indicator);
+                    continue;
+                }
+                float range = scroll.Range[axis];
+                float length = Mathf.Clamp(track * extent / (extent + range), Mathf.Min(IndicatorMinLength, track), track);
+                float along;
+                if (at[axis] < 0f)
+                {
+                    length = Mathf.Max(IndicatorThickness, length + at[axis]);
+                    along = 0f;
+                }
+                else if (at[axis] > range)
+                {
+                    length = Mathf.Max(IndicatorThickness, length - (at[axis] - range));
+                    along = track - length;
+                }
+                else
+                {
+                    along = (track - length) * at[axis] / range;
+                }
+
+                if (indicator == null)
+                    indicator = NewIndicator(state, axis);
+                if (!indicator.gameObject.activeSelf)
+                    indicator.gameObject.SetActive(true);
+                var rt = indicator.rectTransform;
+                KeepLast(rt);
+                // y's from the top right corner down its right edge; x's from the bottom left corner along its bottom edge.
+                var corner = axis == 1 ? Vector2.one : Vector2.zero;
+                if (rt.anchorMin != corner) rt.anchorMin = corner;
+                if (rt.anchorMax != corner) rt.anchorMax = corner;
+                if (rt.pivot != corner) rt.pivot = corner;
+                var position = axis == 1
+                    ? new Vector2(-IndicatorInset, -(IndicatorEnds + along))
+                    : new Vector2(IndicatorEnds + along, IndicatorInset);
+                if (rt.anchoredPosition != position) rt.anchoredPosition = position;
+                var sized = axis == 1 ? new Vector2(IndicatorThickness, length) : new Vector2(length, IndicatorThickness);
+                if (rt.sizeDelta != sized) rt.sizeDelta = sized;
+                if (indicator.color != node.ScrollIndicatorColor) indicator.color = node.ScrollIndicatorColor;
+                float alpha = shown * shown * (3f - 2f * shown);
+                if (indicator.canvasRenderer.GetAlpha() != alpha) indicator.canvasRenderer.SetAlpha(alpha);
+            }
+        }
+
+        // A container's indicator for one axis (0 is x, 1 is y): an object of its own inside it, hidden and never saved,
+        // on its layer, taking no pointer.
+        private static LayoutScrollIndicator NewIndicator(NodeState state, int axis)
+        {
+            var go = new GameObject(axis == 0 ? "Scroll Indicator X" : "Scroll Indicator Y", typeof(RectTransform));
+            go.hideFlags = HideFlags.HideAndDontSave;
+            go.layer = state.Node.gameObject.layer;
+            go.transform.SetParent(state.RectTransform, false);
+            var indicator = go.AddComponent<LayoutScrollIndicator>();
+            indicator.raycastTarget = false;
+            return indicator;
+        }
+
+        // Keeps an indicator drawn over what its container scrolls: after every sibling that is not an indicator, where a
+        // child added or moved to the end since (a new row, a card dropped in) would otherwise be drawn over it.
+        private static void KeepLast(Transform transform)
+        {
+            var parent = transform.parent;
+            for (int i = transform.GetSiblingIndex() + 1; i < parent.childCount; i++)
+            {
+                if (parent.GetChild(i).TryGetComponent(out LayoutScrollIndicator _)) continue;
+                transform.SetAsLastSibling();
+                return;
+            }
+        }
+
+        // Hides a container's indicators at once (it stops scrolling, or is disabled), to fade in afresh when they next show.
+        private static void HideIndicators(ScrollState scroll)
+        {
+            HideIndicator(scroll.IndicatorX);
+            HideIndicator(scroll.IndicatorY);
+            scroll.IndicatorShown = Vector2.zero;
+        }
+
+        private static void HideIndicator(LayoutScrollIndicator indicator)
+        {
+            if (indicator != null && indicator.gameObject.activeSelf)
+                indicator.gameObject.SetActive(false);
         }
 
         private static void QueueScrolled(NodeState state)
@@ -2852,7 +3131,9 @@ namespace TimboJimbo.UI.Layout
         // Hands a scroll container a glide at `speed` (world units a second, the way its content moves, as a finger moving
         // it would), on the axes it scrolls (of `x` and `y`) where it is at rest or gliding and not at its end the way the
         // speed goes: it glides on at it from where it is drawn, and notes what above it could take the glide on in turn.
-        // Held by a press, or springing, it takes none. Returns what it took, in world units a second.
+        // One that snaps (ScrollSnap) moves on to the page or child it goes to instead, taking all of the speed, or none
+        // when that is where it is. Held by a press, or springing, it takes none. Returns what it took, in world units a
+        // second.
         private static Vector3 GlideOn(NodeState state, Vector3 speed, bool x, bool y)
         {
             var scroll = state.Scroll;
@@ -2871,6 +3152,14 @@ namespace TimboJimbo.UI.Layout
                 taken[axis] = v;
             }
             if (taken == Vector2.zero) return Vector3.zero;
+            if (state.Node.ScrollSnap != ScrollSnap.None)
+            {
+                var target = SnapTarget(state, value, taken);
+                if ((target - value).sqrMagnitude < ScrollState.Rest * ScrollState.Rest) return Vector3.zero;
+                SettleSnap(state, target, taken);
+                Hold(scroll.Offset, null);
+                return WorldOfOffsetMove(state, taken);
+            }
             scroll.Glide(taken);
             Hold(scroll.Offset, null);
             NotePassOn(state);
@@ -3009,16 +3298,15 @@ namespace TimboJimbo.UI.Layout
                 var scroll = WheelScroll(s_reach[i]);
                 if (scroll == null) continue;
                 vertical |= scroll.Scrolls(1);
-                left -= Wheel(scroll, left);
+                left -= Wheel(s_reach[i], left);
             }
             if (!vertical && ticks.x == 0f && left.y != 0f)
             {
                 var across = new Vector2(left.y, 0f);
                 for (int i = 0; i < s_reach.Count; i++)
                 {
-                    var scroll = WheelScroll(s_reach[i]);
-                    if (scroll != null)
-                        across -= Wheel(scroll, across);
+                    if (WheelScroll(s_reach[i]) != null)
+                        across -= Wheel(s_reach[i], across);
                 }
                 left.y = across.x;
             }
@@ -3047,20 +3335,38 @@ namespace TimboJimbo.UI.Layout
         // A scroll container takes as much of a wheel's `step` (its units, the way its offset moves) as its range allows
         // on the axes it scrolls, added to its wheel's own target while it is still springing there (so notches add up
         // rather than each starting from where it is drawn), and springs there quickly from where it is at the speed it
-        // has. Returns what it took.
-        private static Vector2 Wheel(ScrollState scroll, Vector2 step)
+        // has. One that snaps (ScrollSnap) takes all of a notch on each axis with a page or child past where it is headed
+        // (its wheel's target, where it springs to, or where it is) that way, and springs on to that one. Returns what it
+        // took.
+        private static Vector2 Wheel(NodeState state, Vector2 step)
         {
-            var origin = scroll.Phase == ScrollPhase.Springing && scroll.Wheeling ? scroll.WheelTarget : scroll.Offset.Value;
+            var scroll = state.Scroll;
+            bool snaps = state.Node.ScrollSnap != ScrollSnap.None;
+            var origin = scroll.Phase != ScrollPhase.Springing ? scroll.Offset.Value
+                : scroll.Wheeling ? scroll.WheelTarget
+                : snaps ? scroll.Offset.Target
+                : scroll.Offset.Value;
+            var target = origin;
             var taken = Vector2.zero;
             for (int axis = 0; axis < 2; axis++)
             {
                 float m = step[axis];
                 if (!scroll.Scrolls(axis) || m == 0f) continue;
+                if (snaps)
+                {
+                    SnapPoints(state, axis, s_snaps);
+                    if (!NextSnap(origin[axis], m, out float next)) continue;
+                    target[axis] = next;
+                    taken[axis] = m;
+                    continue;
+                }
                 float to = Mathf.Clamp(origin[axis] + m, 0f, scroll.Range[axis]) - origin[axis];
                 taken[axis] = m > 0f ? Mathf.Clamp(to, 0f, m) : Mathf.Clamp(to, m, 0f);
+                target[axis] = origin[axis] + taken[axis];
             }
+            s_snaps.Clear();
             if (taken == Vector2.zero) return Vector2.zero;
-            var target = scroll.Clamp(origin + taken);
+            target = scroll.Clamp(target);
             SpringScroll(scroll, target, ScrollState.WheelOmega, 1f, 0f, null);
             if (scroll.Phase == ScrollPhase.Springing)
             {

@@ -126,6 +126,26 @@ namespace TimboJimbo.UI.Layout
         End,
     }
 
+    /// <summary>
+    /// Where a scroll container comes to rest once a drag or a flick lets go of it, as UIKit's paging and SwiftUI's
+    /// scroll target behaviours. A flick moves it on one page or child at most, and a wheel notch one; either end is a
+    /// place to rest too. ScrollTo, ScrollIntoView and ScrollOffset go exactly where they are told.
+    /// </summary>
+    public enum ScrollSnap
+    {
+        /// <summary>Anywhere: a flick glides on to a stop.</summary>
+        None,
+
+        /// <summary>On a whole page of what it shows, as UIKit's isPagingEnabled and SwiftUI's paging.</summary>
+        Pages,
+
+        /// <summary>
+        /// With one of its children in its flow starting where its content starts, inside its padding, as SwiftUI's
+        /// viewAligned: a carousel's card lined up at its leading edge.
+        /// </summary>
+        Children,
+    }
+
     /// <summary>One of nine points on a rect: a corner, the middle of an edge, or its centre.</summary>
     public enum AttachPoint
     {

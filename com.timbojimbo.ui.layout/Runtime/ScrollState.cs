@@ -61,6 +61,10 @@ namespace TimboJimbo.UI.Layout
         // How far a notch of a mouse wheel scrolls, in its units.
         public const float WheelStep = 60f;
 
+        // Let go faster than this (its units a second), a container that snaps (ScrollSnap) moves on to the next page or
+        // child the way it was flicked, rather than to the nearest.
+        public const float SnapFlickSpeed = 300f;
+
         // UIScrollView's normal deceleration rate, 0.998 of its speed kept each millisecond, as a rate a second:
         // v(t) = v0 e^(-k t), k = 1000 ln(1 / 0.998), about 2.002.
         public static readonly float Deceleration = 1000f * Mathf.Log(1f / 0.998f);
@@ -129,6 +133,15 @@ namespace TimboJimbo.UI.Layout
         // The offset Scrolled was last raised with, and whether it is queued to be raised again.
         public Vector2 Raised;
         public bool Queued;
+
+        // Its scroll indicators, added the first time each shows: x's along its bottom edge, y's along its right edge.
+        // For each axis, how far its indicator is faded in (0 to 1), how long that axis has been still, and where it was
+        // scrolled to when last drawn, which tells it moved.
+        public LayoutScrollIndicator IndicatorX;
+        public LayoutScrollIndicator IndicatorY;
+        public Vector2 IndicatorShown;
+        public Vector2 IndicatorStill;
+        public Vector2 IndicatorAt;
 
         /// <summary>Whether it scrolls along <paramref name="axis"/> (0 is x, 1 is y).</summary>
         public bool Scrolls(int axis) => axis == 0

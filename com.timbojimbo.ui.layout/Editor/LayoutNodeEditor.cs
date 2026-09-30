@@ -7,12 +7,13 @@ namespace TimboJimboEditor.UI.Layout
 {
     /// <summary>
     /// Inspector for <see cref="LayoutNode"/>, its settings grouped the way they read: whether it shows, its size, how
-    /// it lays out what is inside it, which way it scrolls that and which end it keeps to, where and how it is drawn
-    /// apart from that (floating, moved by its offset, scaled and faded), then how it moves: its animation, how it
-    /// appears and disappears, and the name it is matched by. What does not apply is hidden: its height while its aspect
-    /// ratio sets it from its width, its scroll anchor while it does not scroll, and, through their drawers, a sizing's
-    /// value but for fixed and percent, a floating's placement but while it floats, and its element but while it floats
-    /// against one. In play mode a scroll container also shows, read only, how far it is scrolled, how far it can be,
+    /// it lays out what is inside it, which way it scrolls that, which end it keeps to, where it comes to rest and
+    /// whether it shows indicators, where and how it is drawn apart from that (floating, moved by its offset, scaled and
+    /// faded), then how it moves: its animation, how it appears and disappears, and the name it is matched by. What does
+    /// not apply is hidden: its height while its aspect ratio sets it from its width, its scroll anchor, snap and
+    /// indicators while it does not scroll, the indicators' colour while it shows none, and, through their drawers, a
+    /// sizing's value but for fixed and percent, a floating's placement but while it floats, and its element but while it
+    /// floats against one. In play mode a scroll container also shows, read only, how far it is scrolled, how far it can be,
     /// and whether it is scrolling, and every node the id it is matched by.
     /// </summary>
     [CustomEditor(typeof(LayoutNode))]
@@ -39,6 +40,9 @@ namespace TimboJimboEditor.UI.Layout
         private SerializedProperty _childAlignY;
         private SerializedProperty _scroll;
         private SerializedProperty _scrollAnchor;
+        private SerializedProperty _scrollSnap;
+        private SerializedProperty _showsScrollIndicators;
+        private SerializedProperty _scrollIndicatorColor;
         private SerializedProperty _floating;
         private SerializedProperty _offset;
         private SerializedProperty _scale;
@@ -47,10 +51,13 @@ namespace TimboJimboEditor.UI.Layout
         private SerializedProperty _displayEffect;
         private SerializedProperty _matchName;
 
-        // The scroll axis and anchor under their group's header, where "Scroll" again would only repeat it; their
-        // tooltips are the fields' own.
+        // The scroll settings under their group's header, where "Scroll" again would only repeat it; their tooltips are
+        // the fields' own.
         private GUIContent _scrollLabel;
         private GUIContent _scrollAnchorLabel;
+        private GUIContent _scrollSnapLabel;
+        private GUIContent _indicatorsLabel;
+        private GUIContent _indicatorColorLabel;
 
         // The readouts as last painted, so the inspector is drawn again only while one is out of date.
         private Vector2 _shownOffset;
@@ -72,6 +79,9 @@ namespace TimboJimboEditor.UI.Layout
             _childAlignY = serializedObject.FindProperty("_childAlignY");
             _scroll = serializedObject.FindProperty("_scroll");
             _scrollAnchor = serializedObject.FindProperty("_scrollAnchor");
+            _scrollSnap = serializedObject.FindProperty("_scrollSnap");
+            _showsScrollIndicators = serializedObject.FindProperty("_showsScrollIndicators");
+            _scrollIndicatorColor = serializedObject.FindProperty("_scrollIndicatorColor");
             _floating = serializedObject.FindProperty("_floating");
             _offset = serializedObject.FindProperty("_offset");
             _scale = serializedObject.FindProperty("_scale");
@@ -81,6 +91,9 @@ namespace TimboJimboEditor.UI.Layout
             _matchName = serializedObject.FindProperty("_matchName");
             _scrollLabel = new GUIContent("Axis", _scroll.tooltip);
             _scrollAnchorLabel = new GUIContent("Anchor", _scrollAnchor.tooltip);
+            _scrollSnapLabel = new GUIContent("Snap", _scrollSnap.tooltip);
+            _indicatorsLabel = new GUIContent("Indicators", _showsScrollIndicators.tooltip);
+            _indicatorColorLabel = new GUIContent("Indicator Color", _scrollIndicatorColor.tooltip);
         }
 
         public override void OnInspectorGUI()
@@ -107,10 +120,16 @@ namespace TimboJimboEditor.UI.Layout
 
             Header("Scroll");
             EditorGUILayout.PropertyField(_scroll, _scrollLabel);
-            // The anchor only means something for a node that scrolls; while nodes that differ in their axis are edited
-            // together, it shows.
+            // The rest only means something for a node that scrolls, and the indicators' colour for one that shows them;
+            // while nodes that differ in either are edited together, it shows.
             if (_scroll.hasMultipleDifferentValues || _scroll.intValue != (int)ScrollAxis.None)
+            {
                 EditorGUILayout.PropertyField(_scrollAnchor, _scrollAnchorLabel);
+                EditorGUILayout.PropertyField(_scrollSnap, _scrollSnapLabel);
+                EditorGUILayout.PropertyField(_showsScrollIndicators, _indicatorsLabel);
+                if (_showsScrollIndicators.hasMultipleDifferentValues || _showsScrollIndicators.boolValue)
+                    EditorGUILayout.PropertyField(_scrollIndicatorColor, _indicatorColorLabel);
+            }
             ScrollReadout();
 
             Header("Position");

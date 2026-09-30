@@ -20,13 +20,13 @@ namespace TimboJimbo.UI.Layout
     /// the other axis, by how far it goes that way. Inside an owner whose <see cref="ILayoutDraggable.PassOnMidDrag"/> is
     /// true, one drag scrolls a container to its end and moves the owner with the rest, and a glide that runs into the end
     /// carries on into it; with false, each drag is one participant's, chosen as it sets off: the innermost with room to
-    /// move that way, or with none, the innermost of all, to rubber-band. Drags keep UGUI's drag threshold, so a tap on a button inside still clicks, and a press that dragged
-    /// never does. A pointer reaches it only through something drawn under the pointer (give a container a background to
-    /// catch drags in the gaps between its children), and a child that takes drags itself keeps them. A press that stops
-    /// something, or that an owner takes hold of, becomes this one's own (whatever took it is let go of at once, and it
-    /// does not click), so its release comes here as a pointer-up. Only the left button (and touch) drags, as with
-    /// ScrollRect. The wheel goes to the containers along its own axis, innermost first, and what they leave to the next
-    /// scroll handler above.
+    /// move that way, or with none, the innermost of all, to rubber-band. Drags keep UGUI's drag threshold, so a tap on a
+    /// button inside still clicks, and a press that dragged never does. A pointer reaches it only through something drawn
+    /// under the pointer (give a container a background to catch drags in the gaps between its children), and a child
+    /// that takes drags itself keeps them. A press that stops something, or that an owner takes hold of, becomes this
+    /// one's own (whatever took it is let go of at once, and it does not click), so its release comes here as a
+    /// pointer-up. Only the left button (and touch) drags, as with ScrollRect. The wheel goes to the containers along its
+    /// own axis, innermost first, and what they leave to the next scroll handler above.
     /// </remarks>
     [AddComponentMenu("")]
     [DisallowMultipleComponent]
