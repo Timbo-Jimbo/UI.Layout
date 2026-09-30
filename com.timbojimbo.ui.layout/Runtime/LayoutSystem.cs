@@ -27,10 +27,13 @@ namespace TimboJimbo.UI.Layout
         // where they are drawn: their springs, targets and layout never see it, and anything that goes through where
         // they are drawn (reparenting, a node first met out of layout) takes it off and puts it back. Children that are
         // plain objects are not moved by it. The offset is the engine's, with a velocity, in phases: held by a press
-        // (following its drag exactly, rubber-banding past the ends), gliding once flicked (at UIScrollView's
-        // deceleration rate), or springing (back to an end, to a wheel's target, or where ScrollTo or ScrollOffset sent
-        // it, on the node's own spring inside Animate); it is stepped with the springs, once a frame in play mode. A
-        // LayoutScroller the system adds takes the pointer for it. In edit mode it is always at the start.
+        // (moved by its share of the drag, rubber-banding past the ends), gliding once flicked (at UIScrollView's
+        // deceleration rate), or springing (back to an end, to a wheel's target, where ScrollTo, ScrollIntoView or
+        // ScrollOffset sent it, or on to its end as its content grows under a ScrollAnchor of End, on the node's own
+        // spring inside Animate); it is stepped with the springs, once a frame in play mode. A LayoutScroller the system
+        // adds takes the pointer for it, and for a node with a drag owner (ILayoutDraggable: a sheet's height, a card's
+        // pull), and a drag is shared among the containers and owners up the hierarchy from the press (see Dragging). In
+        // edit mode the offset is always at the start.
         //
         // A node floating against an element (Floating.Element, in the same tree) is sized and placed against the
         // element's laid-out rect by the solver; its target then also takes in how the element is drawn apart from it:
@@ -61,10 +64,11 @@ namespace TimboJimbo.UI.Layout
         // that one. A flight hidden, or under something hidden, drops out at once and goes with what hid it.
         //
         // Names hand a presentation over (LayoutSystem.Match.cs). A node that starts being shown inside Animate under
-        // the MatchName and id another held before the change (or one that stops being shown, under those another
-        // holds after it) takes over from where that one is drawn, and at the velocity it is drawn moving at, then moves
-        // to its own place on its own springs, fading in. The other follows it, drawn at its rect beneath it and fading
-        // out from halfway, until the pair lands. Both fly, ignoring their parent groups.
+        // the MatchName and id another stops being shown under takes over from where that one is drawn, and at the
+        // velocity it is drawn moving at, then moves to its own place on its own springs, fading in. The other follows
+        // it, drawn at its rect beneath it and fading out from halfway, until the pair lands. Both fly, ignoring their
+        // parent groups. When the other stays shown instead, the one shown or hidden grows out of it or shrinks back into
+        // it, that one's rect its away pose, flying until its effect has played.
 
         // What the system drives on a node's RectTransform, which the editor then shows as driven and does not save.
         private const DrivenTransformProperties Driven = DrivenTransformProperties.Anchors | DrivenTransformProperties.Pivot
@@ -90,7 +94,7 @@ namespace TimboJimbo.UI.Layout
         // waits leaves a null in its place.
         private static readonly List<NodeState> s_shown = new();
 
-        // ScrollTo was asked for something not laid out inside the container: said once.
+        // ScrollTo or ScrollIntoView was asked for something not laid out inside the container: said once.
         private static bool s_warnedScrollTo;
 
         // Nodes whose Floating.Element is a mistake (in another tree, or circular), each said once.
@@ -132,6 +136,14 @@ namespace TimboJimbo.UI.Layout
             s_shown.Clear();
             s_warnedScrollTo = false;
             s_warnedElement.Clear();
+            s_drags.Clear();
+            s_dragPool.Clear();
+            s_partPool.Clear();
+            s_chain.Clear();
+            s_left.Clear();
+            s_reach.Clear();
+            s_handlers.Clear();
+            s_impacts.Clear();
             ResetFlights();
             ResetMatch();
             s_roots.Clear();
@@ -161,10 +173,10 @@ namespace TimboJimbo.UI.Layout
         /// only once everything it hid has, so that is when it is safe to destroy them. A node it moves to another
         /// parent flies there above everything in its root canvas, cut by neither the clip it leaves nor the one it goes
         /// into, until it lands. A node it shows with the <see cref="LayoutNode.MatchName"/> and
-        /// <see cref="LayoutNode.MatchId"/> of one it hides (or of one that stays shown) takes over from where that one
-        /// is drawn, flying above everything as the two cross-fade, until it lands. <paramref name="types"/> say what
-        /// kind of change it is. Called inside another's update,
-        /// the change is part of that one. What it moves takes the pointer on its way (see
+        /// <see cref="LayoutNode.MatchId"/> of one it hides takes over from where that one is drawn, flying above
+        /// everything as the two cross-fade, until it lands; one it shows or hides with those of one that stays shown
+        /// grows out of that one or shrinks back into it. <paramref name="types"/> say what kind of change it is. Called
+        /// inside another's update, the change is part of that one. What it moves takes the pointer on its way (see
         /// <see cref="Animate(Action, bool, string[])"/> for a change that does not).
         /// </summary>
         public static LayoutTransition Animate(Action update, params string[] types) => Animate(update, true, types);
@@ -233,6 +245,37 @@ namespace TimboJimbo.UI.Layout
             return transition;
         }
 
+        // UIScrollView's rubber band coefficient: how much of a pull past an end is drawn at first, before the band
+        // stiffens (RubberBand).
+        internal const float RubberBandCoefficient = 0.55f;
+
+        /// <summary>
+        /// How far something pulled <paramref name="pull"/> past an end is drawn past it: UIScrollView's rubber band,
+        /// (1 - 1 / (pull x 0.55 / limit + 1)) x limit, which gives less the further it is pulled and never reaches
+        /// <paramref name="limit"/>. Scroll containers band by it past their ends, their size that way the limit; a drag
+        /// owner that bands itself (<see cref="ILayoutDraggable"/>: a sheet past its highest detent) can take it for the
+        /// same feel. The pull's sign is kept, and with no limit nothing gives.
+        /// </summary>
+        public static float RubberBand(float pull, float limit)
+        {
+            if (limit <= 0f) return 0f;
+            float over = Mathf.Abs(pull);
+            return Mathf.Sign(pull) * (1f - 1f / (over * RubberBandCoefficient / limit + 1f)) * limit;
+        }
+
+        /// <summary>
+        /// <see cref="RubberBand"/> undone: the pull that draws something <paramref name="stretched"/> past an end, for a
+        /// drag that takes hold of it there to carry on from that pull without a jump, limit / 0.55 x s / (limit - s). A
+        /// spring can carry something further past an end than a pull could draw it (which never reaches the limit), so s
+        /// is kept just short of the limit. The sign is kept, and with no limit there is no pull.
+        /// </summary>
+        public static float RubberBandInverse(float stretched, float limit)
+        {
+            if (limit <= 0f) return 0f;
+            float over = Mathf.Min(Mathf.Abs(stretched), limit * 0.99f);
+            return Mathf.Sign(stretched) * (limit / RubberBandCoefficient * over / (limit - over));
+        }
+
         // ── For LayoutNode and LayoutTransition ──────────────────────────────────
 
         internal static void Register(LayoutNode node)
@@ -277,7 +320,10 @@ namespace TimboJimbo.UI.Layout
                     if (state.Group.alpha != 1f) state.Group.alpha = 1f;
                     if (!state.Group.blocksRaycasts) state.Group.blocksRaycasts = true;
                 }
-                // Nor scrolled: what it added stops clipping and taking the pointer (met again, it takes them back).
+                // Nor scrolled nor dragged: what it added stops clipping and taking the pointer (met again, it takes
+                // them back). A drag it was taking part in passes it over from now on; one whose LayoutScroller this
+                // was ends in the next frame.
+                if (state.Scroller != null) state.Scroller.enabled = false;
                 var scroll = state.Scroll;
                 if (scroll != null)
                 {
@@ -289,7 +335,6 @@ namespace TimboJimbo.UI.Layout
                         s_scrolled.Remove(state);
                     }
                     if (scroll.Clip != null && IsHidden(scroll.Clip)) scroll.Clip.enabled = false;
-                    if (scroll.Scroller != null) scroll.Scroller.enabled = false;
                 }
             }
             Changed(node);
@@ -496,29 +541,41 @@ namespace TimboJimbo.UI.Layout
         internal static bool IsScrolling(LayoutNode node) =>
             s_states.TryGetValue(node, out var state) && state.Scroll != null && state.Scroll.Phase != ScrollPhase.Idle;
 
-        // Scrolls so that `descendant` sits `anchor` of the way along what it shows, within range. Inside Animate's
-        // update, that change's pass does it (the descendant may be added in the same update), on the node's spring for
-        // it. Otherwise at once when the descendant has been laid out inside it, and at the end of the next pass, at
-        // once, when it has not yet. Something not inside it is not scrolled to (and said so, once).
-        internal static void ScrollTo(LayoutNode node, LayoutNode descendant, float anchor)
+        // Scrolls so that `descendant`, with the space around it, sits `anchor` of the way along what it shows, within
+        // range.
+        internal static void ScrollTo(LayoutNode node, LayoutNode descendant, float anchor) =>
+            ScrollToDescendant(node, descendant, ScrollRequest.To, anchor);
+
+        // Scrolls only as far as brings `descendant`, with the space around it, into view, to the nearer end.
+        internal static void ScrollIntoView(LayoutNode node, LayoutNode descendant) =>
+            ScrollToDescendant(node, descendant, ScrollRequest.IntoView, 0f);
+
+        // A ScrollTo (`kind` To, at `anchor`) or ScrollIntoView. Inside Animate's update, that change's pass does it (the
+        // descendant may be added in the same update), on the node's spring for it. Otherwise at once when the
+        // descendant has been laid out inside it, and at the end of the next pass, at once, when it has not yet.
+        // Something not inside it is not scrolled to (and said so, once).
+        private static void ScrollToDescendant(LayoutNode node, LayoutNode descendant, ScrollRequest kind, float anchor)
         {
             if (descendant == null) throw new ArgumentNullException(nameof(descendant));
             if (!Application.isPlaying || node.Scroll == ScrollAxis.None || !s_states.TryGetValue(node, out var state)) return;
             if (descendant == node || !descendant.transform.IsChildOf(node.transform))
             {
-                WarnScrollTo(node, descendant);
+                WarnScrollTo(node, descendant, kind);
                 return;
             }
             var scroll = state.Scroll ??= new ScrollState();
             if (s_current == null && scroll.Measured && scroll.Axis != ScrollAxis.None
-                && TryScrollTarget(state, descendant, anchor, out var offset))
+                && TryScrollRect(state, descendant, out var min, out var max))
             {
                 ClearRequest(scroll);
-                StopScrollAt(scroll, offset);
-                FlushIfIdle();
+                if (TryScrollOffset(scroll, kind, anchor, min, max, out var offset))
+                {
+                    StopScrollAt(scroll, offset);
+                    FlushIfIdle();
+                }
                 return;
             }
-            RequestScroll(scroll, ScrollRequest.To, Vector2.zero, descendant, anchor);
+            RequestScroll(scroll, kind, Vector2.zero, descendant, anchor);
         }
 
         // Puts everything the transition is moving where it is going, as if it had got there, and finishes it.
@@ -564,10 +621,16 @@ namespace TimboJimbo.UI.Layout
             // dragged at whatever the game's time is doing, as UIKit and ScrollRect do.
             float dt = Time.unscaledDeltaTime;
 
+            // A drag whose LayoutScroller went hears nothing more from UGUI: it lets go before the frame is laid out.
+            if (playing)
+                EndLostDrags();
             Frame(playing, step, dt);
-            // A Finished handler may have shown, made or moved nodes: they are laid out and drawn this frame too,
-            // rather than drawn once where they were first. Nothing is stepped again.
-            if (Flush())
+            // A glide that ran into an end with something above it to take its speed hands it on now the frame is laid
+            // out (an owner's code may start a change); and a Finished handler may have shown, made or moved nodes.
+            // Either way what moved is laid out and drawn this frame too, from where it is, rather than drawn once where
+            // it was first. Nothing is stepped again.
+            bool handed = HandOn();
+            if (Flush() || handed)
             {
                 Frame(playing, false, dt);
                 Flush();
@@ -618,14 +681,17 @@ namespace TimboJimbo.UI.Layout
                             else
                                 Land(state);
                         }
+                        // Its effect has played out against the node it grew out of or shrank into: drawn by itself again.
+                        if (state.Anchor != null && !state.Leaving && AnchorPlayed(state))
+                            state.Anchor = null;
                     }
                     for (int i = 0; i < s_visit.Count; i++)
                     {
                         var state = s_visit[i];
                         FollowElement(state);
-                        // A follower is drawn at the rect of the node it follows, which may be in a tree laid out after
-                        // this one: it is written once every tree has been.
-                        if (state.Follows != null)
+                        // A follower is drawn at the rect of the node it follows, and an anchored node from the rect of its
+                        // anchor, which may be in a tree laid out after this one: each is written once every tree has been.
+                        if (state.Follows != null || state.Anchor != null)
                             s_following.Add(state);
                         else
                             Write(state);
@@ -635,7 +701,7 @@ namespace TimboJimbo.UI.Layout
                 }
                 // In the order they were met, outer trees first and parents before children, so one inside another
                 // (an avatar in a card, each following its own) is drawn once that one has been. What they follow is
-                // never a follower itself, so it has been drawn already.
+                // never a follower itself, and what they grow out of stays shown, so it has been drawn already.
                 for (int i = 0; i < s_following.Count; i++)
                     Write(s_following[i]);
                 s_following.Clear();
@@ -740,8 +806,12 @@ namespace TimboJimbo.UI.Layout
             state.WasShown = state.PassShown;
             state.PassShown = node.Display == DisplayMode.Visible && (above == null || above.PassShown);
             RecordKey(state, above);
+            // Its drag owner, looked up for every node met as its content is, before its scroll is set up: either one
+            // wants the LayoutScroller that takes the pointer for it.
+            node.TryGetComponent(out state.Draggable);
             if (node.Scroll != ScrollAxis.None || state.Scroll != null)
                 SetUpScroll(state);
+            SetUpScroller(state);
             // Not drawn as the pass starts, with nothing it is seen to move from: never placed, back in layout from
             // None having left (the targets it kept are stale), or under something that is. A Hidden node stays laid
             // out, so its targets are current: what an Animate gives it, it moves to, even from no opacity (a toast
@@ -1139,7 +1209,7 @@ namespace TimboJimbo.UI.Layout
 
         // Where a node's opacity goes: its Opacity, or nothing while it is away with its effect fading, or while it
         // follows the node that took over from it by name, drawn at that one's rect as it fades in over it (otherwise
-        // every pass would put a source that stays shown back to its Opacity).
+        // every pass would put a source whose effect does not fade back to its Opacity).
         private static float OpacityTargetOf(NodeState state)
         {
             var node = state.Node;
@@ -1237,7 +1307,7 @@ namespace TimboJimbo.UI.Layout
         {
             var parent = state.PassParent;
             var edge = state.Node.DisplayEffect.Edge;
-            if (parent == null || edge == DisplayEdge.None) return Vector2.zero;
+            if (parent == null || edge == DisplayEdge.None || state.Anchor != null) return Vector2.zero;
             var min = ScrolledBy(parent);
             Vector2 size;
             if (state.Node.Floating.AttachTo == FloatingAttach.Root && parent.PassIndex >= 0)
@@ -1275,17 +1345,56 @@ namespace TimboJimbo.UI.Layout
             (state.Node.Display == DisplayMode.Visible || state.Leaving) && !state.EffectOff;
 
         // How far its effect's edge moves where it is drawn, in its parent's layout space: its away move, as far as it
-        // is not shown.
-        private static Vector2 SlideOf(NodeState state) =>
-            Posed(state) ? state.Away * (1f - state.Shown.Value.x) : Vector2.zero;
+        // is not shown; with an anchor, the way from its position to where that is drawn, as far as it is not shown.
+        private static Vector2 SlideOf(NodeState state)
+        {
+            if (!Posed(state)) return Vector2.zero;
+            float away = 1f - state.Shown.Value.x;
+            return state.Anchor != null ? (state.AnchorCentre - state.Position.Value) * away : state.Away * away;
+        }
 
-        // How fast that is moving, in its parent's layout units a second.
-        private static Vector2 SlideVelocityOf(NodeState state) =>
-            Posed(state) ? -state.Away * state.Shown.Velocity.x : Vector2.zero;
+        // How fast that is moving, in its parent's layout units a second (an anchor's own motion left out).
+        private static Vector2 SlideVelocityOf(NodeState state)
+        {
+            if (!Posed(state)) return Vector2.zero;
+            if (state.Anchor == null) return -state.Away * state.Shown.Velocity.x;
+            return -(state.AnchorCentre - state.Position.Value) * state.Shown.Velocity.x
+                - state.Position.Velocity * (1f - state.Shown.Value.x);
+        }
 
         // How much its effect's shrink scales it: 1 - Shrink away, 1 shown, unclamped, so a bouncy entrance overshoots.
+        // With an anchor it is sized from that instead (DrawnSizeOf).
         private static float EffectScaleOf(NodeState state) =>
-            Posed(state) ? Mathf.LerpUnclamped(1f - state.Node.DisplayEffect.Shrink, 1f, state.Shown.Value.x) : 1f;
+            Posed(state) && state.Anchor == null
+                ? Mathf.LerpUnclamped(1f - state.Node.DisplayEffect.Shrink, 1f, state.Shown.Value.x)
+                : 1f;
+
+        // The size it is drawn at before its scale: its size; with an anchor, from the anchor's drawn size (over its own
+        // scale, which it is drawn at) to its own, as far as it is shown, unclamped as the shrink is. What is inside it is
+        // laid out at its own size throughout, pinned at its top left.
+        private static Vector2 DrawnSizeOf(NodeState state)
+        {
+            if (state.Anchor == null || !Posed(state)) return state.Size.Value;
+            float scale = state.Scale.Value.x;
+            var from = scale > 1e-4f ? state.AnchorSize / scale : state.AnchorSize;
+            return Vector2.LerpUnclamped(from, state.Size.Value, state.Shown.Value.x);
+        }
+
+        // Reads where a node's anchor is drawn this frame into its parent's layout space (the parent's scroll put back
+        // on, as its position is). An anchor that has gone, or a parent drawn at a scale of about nothing, leaves the
+        // last reading: its effect plays out against where the anchor was.
+        private static void ReadAnchor(NodeState state)
+        {
+            var space = SpaceOf(state);
+            if (!Live(state.Anchor) || space == null || Degenerate(space)) return;
+            DrawnIn(state.Anchor.RectTransform, space, out var centre, out state.AnchorSize);
+            state.AnchorCentre = centre + ScrolledBy(state.Parent);
+        }
+
+        // Whether a node's effect has played out against its anchor: its shown value and its fade at rest, and not held
+        // there by a catch.
+        private static bool AnchorPlayed(NodeState state) =>
+            !state.Shown.Moving && !state.Opacity.Moving && !state.HoldShown;
 
         // The scale it is drawn at around its centre: its Scale's times its effect's, never below nothing, so a bouncy
         // exit shrinking to nothing stops there rather than turning inside out.
@@ -1510,9 +1619,11 @@ namespace TimboJimbo.UI.Layout
             }
             else if (state.Parent != null)
             {
+                if (state.Anchor != null)
+                    ReadAnchor(state);
                 var centre = state.Position.Value + SlideOf(state) - ScrolledBy(state.Parent);
                 // A bouncy spring shrinking to nothing swings past it: it stops at nothing rather than turning inside out.
-                var size = Vector2.Max(state.Size.Value, Vector2.zero);
+                var size = Vector2.Max(DrawnSizeOf(state), Vector2.zero);
                 WriteRect(state.RectTransform, centre, size, DrawnScaleOf(state));
             }
 
@@ -1577,12 +1688,11 @@ namespace TimboJimbo.UI.Layout
         // ── Scrolling ────────────────────────────────────────────────────────────
 
         // Makes a node a scroll container, or stops it being one, when its Scroll has changed since the last pass. A
-        // scroll container clips what is in it with a RectMask2D and takes the pointer with a LayoutScroller, both added
-        // hidden and never saved (in edit mode too, so the clip shows there), or found on it already (after a domain
-        // reload, say): a RectMask2D of its own, not hidden, clips anyway and is never touched. One that stops
-        // scrolling turns them off, keeping them for when it scrolls again. Whatever it was doing stops where it is
-        // drawn on the axes it still scrolls, at the start on the others; what was asked of it waits for the pass, unless
-        // it scrolls no more.
+        // scroll container clips what is in it with a RectMask2D, added hidden and never saved (in edit mode too, so the
+        // clip shows there), or found on it already (after a domain reload, say): a RectMask2D of its own, not hidden,
+        // clips anyway and is never touched. One that stops scrolling turns it off, keeping it for when it scrolls
+        // again. Whatever it was doing stops where it is drawn on the axes it still scrolls, at the start on the others;
+        // what was asked of it waits for the pass, unless it scrolls no more. (The pointer is SetUpScroller's.)
         private static void SetUpScroll(NodeState state)
         {
             var node = state.Node;
@@ -1598,7 +1708,6 @@ namespace TimboJimbo.UI.Layout
             {
                 ClearRequest(scroll);
                 if (scroll.Clip != null && IsHidden(scroll.Clip) && scroll.Clip.enabled) scroll.Clip.enabled = false;
-                if (scroll.Scroller != null && scroll.Scroller.enabled) scroll.Scroller.enabled = false;
                 // Its children are drawn where they are laid out again: it is scrolled by nothing.
                 if (scroll.Raised != Vector2.zero) QueueScrolled(state);
                 return;
@@ -1607,9 +1716,25 @@ namespace TimboJimbo.UI.Layout
             if (scroll.Clip == null && !node.TryGetComponent(out scroll.Clip))
                 scroll.Clip = Hide(node.gameObject.AddComponent<RectMask2D>());
             if (scroll.Clip != null && IsHidden(scroll.Clip) && !scroll.Clip.enabled) scroll.Clip.enabled = true;
-            if (scroll.Scroller == null && !node.TryGetComponent(out scroll.Scroller))
-                scroll.Scroller = Hide(node.gameObject.AddComponent<LayoutScroller>());
-            if (scroll.Scroller != null && !scroll.Scroller.enabled) scroll.Scroller.enabled = true;
+        }
+
+        // Gives a node the LayoutScroller that takes the pointer for it while it scrolls or has an enabled drag owner,
+        // added hidden and never saved (in edit mode too) or found on it already, and turns it off while it has neither,
+        // keeping it for when it does again: a node that neither scrolls nor has an owner never takes a drag from what is
+        // under it. An owner's node gets no clip.
+        private static void SetUpScroller(NodeState state)
+        {
+            var node = state.Node;
+            if (node.Scroll != ScrollAxis.None || IsLive(state.Draggable))
+            {
+                if (state.Scroller == null && !node.TryGetComponent(out state.Scroller))
+                    state.Scroller = Hide(node.gameObject.AddComponent<LayoutScroller>());
+                if (state.Scroller != null && !state.Scroller.enabled) state.Scroller.enabled = true;
+            }
+            else if (state.Scroller != null && state.Scroller.enabled)
+            {
+                state.Scroller.enabled = false;
+            }
         }
 
         private static T Hide<T>(T component) where T : Component
@@ -1623,22 +1748,45 @@ namespace TimboJimbo.UI.Layout
         private static bool IsHidden(Component component) => (component.hideFlags & HideFlags.HideInInspector) != 0;
 
         // After a pass has placed a scroll container's tree: it takes its size and range from the solver (how far its
-        // content runs past its size, on the axes it scrolls). Then, in play mode: what is moving it heads for where it
-        // can now go, keeping its speed; a request made of it is resolved; and, at rest, it comes back into range if its
-        // content shrank under it, on its spring for the change inside Animate and at once outside. Held, gliding or
+        // content runs past its size, on the axes it scrolls). Held by a press, it is kept within its new range unless it
+        // is stretched past an end (by the drag, or caught there by the press), and drawn banded against it if it is: an
+        // owner moving in the same drag can change its range (a sheet growing past full resizes its list), and one left
+        // drawn past its end there would spring back short of it once let go. Then, in play mode: what is moving it heads
+        // for where it can now go, keeping its speed; a request made of it is resolved; with its ScrollAnchor at End, it
+        // is kept at its end as its range grows (KeepAtEnd), unless a request sent it somewhere, which wins (a
+        // ScrollIntoView that finds its descendant in view sends it nowhere); and, at rest, it comes back into range if
+        // its content shrank under it, on its spring for the change inside Animate and at once outside. Gliding or
         // springing, it is left to its motion, which settles in range.
         private static void SettleScroll(NodeState state, LayoutTransition transition)
         {
             var scroll = state.Scroll;
+            // Whether it is at its end on each axis, and its range, before this pass changes that range; and whether it
+            // has been laid out before.
+            bool first = !scroll.Measured;
+            var was = scroll.Range;
+            bool endX = false, endY = false;
+            if (state.Node.ScrollAnchor == ScrollAnchor.End)
+            {
+                endX = scroll.Scrolls(0) && scroll.StaysAtEnd(0);
+                endY = scroll.Scrolls(1) && scroll.StaysAtEnd(1);
+            }
             if (state.PassIndex >= 0)
             {
                 ref var solved = ref s_solver[state.PassIndex];
                 var size = solved.Rect.size;
+                bool held = scroll.Phase == ScrollPhase.Dragging;
+                bool stretched = held && scroll.Raw != scroll.Clamp(scroll.Raw);
                 scroll.Viewport = size;
                 // Overflow within the solver's epsilon is float rounding, not something to scroll to.
                 var overflow = solved.ContentSize - size;
                 scroll.Range = scroll.OnAxes(new Vector2(overflow.x > 0.01f ? overflow.x : 0f, overflow.y > 0.01f ? overflow.y : 0f));
                 scroll.Measured = true;
+                if (held)
+                {
+                    if (!stretched)
+                        scroll.Raw = scroll.Clamp(scroll.Raw);
+                    scroll.Offset.Value = scroll.Band(scroll.Raw);
+                }
             }
             if (!Application.isPlaying || !scroll.Measured) return;
 
@@ -1649,6 +1797,8 @@ namespace TimboJimbo.UI.Layout
             }
             if (scroll.Request != ScrollRequest.None && state.PassIndex >= 0 && ResolveRequest(state, transition))
                 return;
+            if ((endX || endY) && KeepAtEnd(state, endX, endY, was, first, transition))
+                return;
             if (scroll.Phase == ScrollPhase.Idle)
             {
                 var value = scroll.Offset.Value;
@@ -1658,10 +1808,43 @@ namespace TimboJimbo.UI.Layout
             }
         }
 
+        // Keeps a scroll container whose ScrollAnchor is End at its end on the axes it was at its end on as the pass
+        // started (`x`, `y`: StaysAtEnd), where its range has grown past `was`, as SwiftUI's defaultScrollAnchor(.bottom)
+        // for size changes, or a chat pinned to its latest message. The first time it is laid out, at once, so it starts
+        // there; inside Animate, on its spring for the change, from where it is and at its speed; outside, at once, or,
+        // springing already, only where it springs to moves, so its motion carries on unbroken. Its other axis stays
+        // where it is or goes where it was going. A range that shrank needs nothing: at rest it is brought back into
+        // range anyway, and what it springs to is kept within range. Returns whether it moved it.
+        private static bool KeepAtEnd(NodeState state, bool x, bool y, Vector2 was, bool first, LayoutTransition transition)
+        {
+            var scroll = state.Scroll;
+            var range = scroll.Range;
+            x &= range.x > was.x;
+            y &= range.y > was.y;
+            if (!x && !y) return false;
+
+            bool springing = scroll.Phase == ScrollPhase.Springing;
+            var to = springing ? scroll.Offset.Target : scroll.Offset.Value;
+            if (x) to.x = range.x;
+            if (y) to.y = range.y;
+            to = scroll.Clamp(to);
+            if (springing && transition == null)
+            {
+                scroll.Offset.Target = to;
+                if (scroll.Wheeling)
+                    scroll.WheelTarget = to;
+                return true;
+            }
+            MoveScroll(state, to, first ? null : transition);
+            return true;
+        }
+
         // Resolves what was asked of a scroll container, at the end of a pass that laid it out: springing for the
         // change it was asked in when this is that change's pass, and at once otherwise (asked outside Animate, or in an
-        // update that threw). A ScrollTo whose descendant is not laid out inside it (Display None, or under a root of
-        // its own) is dropped. Returns whether it resolved one.
+        // update that threw). A ScrollTo or ScrollIntoView whose descendant is not laid out inside it (Display None, or
+        // under a root of its own) is dropped, and a ScrollIntoView that finds it in view already moves nothing. Returns
+        // whether it sent it somewhere: true for an offset or a ScrollTo even when that is where it is already, as either
+        // asked for that place; false for one dropped, or a ScrollIntoView that moves nothing.
         private static bool ResolveRequest(NodeState state, LayoutTransition transition)
         {
             var scroll = state.Scroll;
@@ -1677,25 +1860,29 @@ namespace TimboJimbo.UI.Layout
             {
                 offset = scroll.Clamp(requested);
             }
-            else if (descendant == null || !TryScrollTarget(state, descendant, anchor, out offset))
+            else if (descendant == null || !TryScrollRect(state, descendant, out var min, out var max))
             {
                 if (descendant != null)
-                    WarnScrollTo(state.Node, descendant);
+                    WarnScrollTo(state.Node, descendant, kind);
+                return false;
+            }
+            else if (!TryScrollOffset(scroll, kind, anchor, min, max, out offset))
+            {
                 return false;
             }
             MoveScroll(state, offset, move);
             return true;
         }
 
-        // Where a scroll container scrolls to so that `descendant` sits `anchor` of the way along what it shows: the
-        // descendant's target rect in the container's content space (its target top-left, centre - size / 2, and each
-        // of its layout parents' up to the container's child, each in its own parent's layout space, added up), then
-        // on each axis it scrolls, that start less anchor of the room around it (the container's size less the
-        // descendant's), within range. False when it is not laid out inside it: not placed yet, out of layout, or
-        // under a root of its own.
-        private static bool TryScrollTarget(NodeState container, LayoutNode descendant, float anchor, out Vector2 offset)
+        // The rect a ScrollTo or ScrollIntoView of `descendant` lines up, from `min` to `max` in the container's content
+        // space: the descendant's target rect there (its target top-left, centre - size / 2, and each of its layout
+        // parents' up to the container's child, each in its own parent's layout space, added up), grown on each side by
+        // the space around it (MarginOf). Read from the targets the last pass gave, not the solver's nodes, which the
+        // next tree's pass writes over (and ScrollTo also runs between passes). False when it is not laid out inside
+        // it: not placed yet, out of layout, or under a root of its own.
+        private static bool TryScrollRect(NodeState container, LayoutNode descendant, out Vector2 min, out Vector2 max)
         {
-            offset = default;
+            min = max = default;
             if (!s_states.TryGetValue(descendant, out var target)) return false;
             var start = Vector2.zero;
             for (var state = target; state != container; state = state.Parent)
@@ -1703,9 +1890,102 @@ namespace TimboJimbo.UI.Layout
                 if (state == null || !state.Seen || state.PassIndex < 0) return false;
                 start += state.Position.Target - state.Size.Target * 0.5f;
             }
-            var scroll = container.Scroll;
-            offset = scroll.Clamp(start - anchor * (scroll.Viewport - target.Size.Target));
+            var end = start + target.Size.Target;
+            for (int axis = 0; axis < 2; axis++)
+            {
+                min[axis] = start[axis] - MarginOf(container, target, axis, false);
+                max[axis] = end[axis] + MarginOf(container, target, axis, true);
+            }
             return true;
+        }
+
+        // How far the rect a ScrollTo lines up runs past `target`'s own on one side of one axis (0 is x, 1 is y; `end`
+        // the right or bottom side, otherwise the left or top): CSS's scroll-margin, worked out from the layout. Along
+        // its parent's direction, a neighbour in the flow on that side puts the gap between them there, and that is
+        // all, so the neighbour's edge meets the view's and no sliver of it shows. With no neighbour there, or across
+        // its parent's direction (where it has none), its parent's padding; and while that takes it to its parent's
+        // edge, the space around its parent there too, on up to the container, whose padding is where its content
+        // starts and ends. One aligned in from its parent's edge stops at the padding, the space around its parent
+        // being further off. A floating node is out of the flow: it adds nothing, and nothing above it counts. The
+        // chain up to the container has been checked by the caller.
+        private static float MarginOf(NodeState container, NodeState target, int axis, bool end)
+        {
+            // Within the solver's epsilon of its parent's edge, the rest is float rounding: it is at the edge.
+            const float rounding = 0.01f;
+            float margin = 0f;
+            for (var state = target; ; state = state.Parent)
+            {
+                var node = state.Node;
+                if (node.Floating.IsFloating) return margin;
+                var parent = state.Parent;
+                var layout = parent.Node;
+                bool along = (layout.Direction == LayoutDirection.LeftToRight) == (axis == 0);
+                if (along && HasFlowNeighbour(parent, state, end))
+                    return margin + layout.ChildGap;
+                var padding = layout.Padding;
+                float inset = axis == 0 ? (end ? padding.Right : padding.Left) : (end ? padding.Bottom : padding.Top);
+                margin += inset;
+                if (parent == container) return margin;
+                // Where layout puts its edge (its target, less its own Offset, which is y up), moved out by the
+                // padding, against its parent's edge.
+                float centre = state.Position.Target[axis] - (axis == 0 ? node.Offset.x : -node.Offset.y);
+                float half = state.Size.Target[axis] * 0.5f;
+                float apart = end ? parent.Size.Target[axis] - (centre + half + inset) : centre - half - inset;
+                if (Mathf.Abs(apart) > rounding) return margin;
+            }
+        }
+
+        // Whether `child` has a neighbour in `parent`'s flow after it (`after`) or before it: a sibling node the last
+        // pass laid out there, Hidden ones included, as they keep their space. One out of layout (inactive, disabled or
+        // Display None, a node on its way out included, having left already) or floating is not in the flow.
+        private static bool HasFlowNeighbour(NodeState parent, NodeState child, bool after)
+        {
+            var transform = parent.RectTransform;
+            int step = after ? 1 : -1;
+            for (int i = child.RectTransform.GetSiblingIndex() + step; i >= 0 && i < transform.childCount; i += step)
+            {
+                if (transform.GetChild(i).TryGetComponent(out LayoutNode sibling) && sibling.isActiveAndEnabled
+                    && s_states.TryGetValue(sibling, out var state) && state.Seen && state.PassIndex >= 0
+                    && !sibling.Floating.IsFloating)
+                    return true;
+            }
+            return false;
+        }
+
+        // Where a container scrolls to for the rect from `min` to `max` in its content (TryScrollRect), on each axis it
+        // scrolls. A ScrollTo (`kind` To): the rect's start less `anchor` of the room around it (what it shows less the
+        // rect), within range, as it was for the descendant alone. A ScrollIntoView, as CSS's 'nearest': only the axes
+        // on which the rect is not wholly in view from where the container rests (where it is, or where it springs to),
+        // give or take its rest distance, move, lining its start up with the view's start when it runs past the start,
+        // and its end with the view's end when it runs past the end; for a rect bigger than the view, the other way
+        // round, the least move that fills the view with it. One running past both edges already fills it and stays.
+        // False for a ScrollIntoView that finds nothing to move, which leaves the container as it is, gliding or held
+        // by a press included.
+        private static bool TryScrollOffset(ScrollState scroll, ScrollRequest kind, float anchor, Vector2 min, Vector2 max, out Vector2 offset)
+        {
+            var viewport = scroll.Viewport;
+            if (kind != ScrollRequest.IntoView)
+            {
+                offset = scroll.Clamp(min - anchor * (viewport - (max - min)));
+                return true;
+            }
+
+            var resting = scroll.Phase == ScrollPhase.Springing ? scroll.Offset.Target : scroll.Offset.Value;
+            offset = resting;
+            bool moves = false;
+            for (int axis = 0; axis < 2; axis++)
+            {
+                if (!scroll.Scrolls(axis)) continue;
+                bool before = min[axis] < resting[axis] - ScrollState.Rest;
+                bool past = max[axis] > resting[axis] + viewport[axis] + ScrollState.Rest;
+                if (before == past) continue;
+                bool bigger = max[axis] - min[axis] > viewport[axis];
+                offset[axis] = before != bigger ? min[axis] : max[axis] - viewport[axis];
+                moves = true;
+            }
+            if (!moves) return false;
+            offset = scroll.Clamp(offset);
+            return offset != resting;
         }
 
         // Keeps what was asked of a scroll container for a pass to resolve (the latest ask wins), with the change it
@@ -1726,11 +2006,13 @@ namespace TimboJimbo.UI.Layout
             scroll.RequestTransition = null;
         }
 
-        private static void WarnScrollTo(LayoutNode node, LayoutNode descendant)
+        // Says, once, that a ScrollTo or ScrollIntoView (`kind`) of `descendant` was dropped, naming the call made.
+        private static void WarnScrollTo(LayoutNode node, LayoutNode descendant, ScrollRequest kind)
         {
             if (s_warnedScrollTo) return;
             s_warnedScrollTo = true;
-            Debug.LogWarning($"{node.name}.ScrollTo({descendant.name}): {descendant.name} is not laid out inside {node.name}, so it is not scrolled to. (Said once.)", node);
+            string call = kind == ScrollRequest.IntoView ? "ScrollIntoView" : "ScrollTo";
+            Debug.LogWarning($"{node.name}.{call}({descendant.name}): {descendant.name} is not laid out inside {node.name}, so it is not scrolled to. (Said once.)", node);
         }
 
         // Scrolls a container to `offset`: at once without a transition; with one, on the node's own spring (its
@@ -1755,7 +2037,6 @@ namespace TimboJimbo.UI.Layout
         {
             var offset = scroll.Offset;
             scroll.Press = null;
-            scroll.Dragged = false;
             scroll.GlideX = scroll.GlideY = false;
             scroll.Wheeling = false;
             offset.Target = scroll.OnAxes(target);
@@ -1781,13 +2062,13 @@ namespace TimboJimbo.UI.Layout
             Stop(spring, arrived);
             scroll.Phase = ScrollPhase.Idle;
             scroll.Press = null;
-            scroll.Dragged = false;
             scroll.GlideX = scroll.GlideY = false;
             scroll.Wheeling = false;
         }
 
         // A press takes hold of a scroll: it stops where it is drawn (letting go of the change it was springing for, on
-        // its way) and is held, following the press's drag once one sets off.
+        // its way) and is held, its raw offset where it is drawn with the rubber band undone, moved by its shares of the
+        // press's drag once one sets off.
         private static void TakeHold(ScrollState scroll, PointerEventData press)
         {
             var spring = scroll.Offset;
@@ -1798,19 +2079,20 @@ namespace TimboJimbo.UI.Layout
             spring.Moving = true;
             scroll.Phase = ScrollPhase.Dragging;
             scroll.Press = press;
-            scroll.Dragged = false;
+            scroll.Raw = scroll.Unband(spring.Value);
             scroll.GlideX = scroll.GlideY = false;
             scroll.Wheeling = false;
         }
 
         // The press holding a scroll lets go of it at `velocity`: out of range it springs back to the end it is past (0.4
-        // seconds, no bounce), carrying that velocity; in range it glides on at it, to a stop, or on into an end that it
-        // then springs back from. Let go of at a standstill in range, it stays where it is.
-        private static void LetGo(ScrollState scroll, Vector2 velocity)
+        // seconds, no bounce), carrying that velocity; in range it glides on at it, to a stop, or on into an end, where it
+        // springs back, or stops for what is above it to take its speed (NotePassOn). Let go of at a standstill in range,
+        // it stays where it is.
+        private static void LetGo(NodeState state, Vector2 velocity)
         {
+            var scroll = state.Scroll;
             var spring = scroll.Offset;
             scroll.Press = null;
-            scroll.Dragged = false;
             spring.Velocity = scroll.OnAxes(velocity);
             spring.Target = scroll.Clamp(spring.Value);
             spring.Omega = ScrollState.BounceOmega;
@@ -1819,14 +2101,16 @@ namespace TimboJimbo.UI.Layout
             scroll.GlideX = scroll.Scrolls(0) && spring.Target.x == spring.Value.x;
             scroll.GlideY = scroll.Scrolls(1) && spring.Target.y == spring.Value.y;
             scroll.Phase = scroll.GlideX || scroll.GlideY ? ScrollPhase.Gliding : ScrollPhase.Springing;
+            NotePassOn(state);
         }
 
         // Moves a scroll container's offset on, once a frame in play mode, as Advance does a spring: a glide or a spring
-        // is stepped (bar the frame it set off from rest in) and put where it is going, at rest, once it is there. A press
-        // lets go of it in OnEndDrag (having dragged) or OnScrollRelease (having only stopped it); one whose node went
-        // lets go here. The press itself is not read for whether it is over: the Input System's UI module shares one
-        // event among a mouse's buttons and overwrites it every frame the mouse moves. Outside play mode it is at the
-        // start. A changed offset is queued for Scrolled.
+        // is stepped (bar the frame it set off from rest in) and put where it is going, at rest, once it is there. A glide
+        // that ran into an end for what is above it to take its speed is queued for HandOn. A press lets go of it as its
+        // drag ends or its pointer comes up (EndDrag), or in the next frame when its LayoutScroller has gone. The press
+        // itself is not read for whether it is over: the Input System's UI module shares one event among a mouse's
+        // buttons and overwrites it every frame the mouse moves. Outside play mode it is at the start. A changed offset is
+        // queued for Scrolled.
         private static void StepScroll(NodeState state, bool playing, bool step, float dt)
         {
             var scroll = state.Scroll;
@@ -1835,13 +2119,13 @@ namespace TimboJimbo.UI.Layout
                 if (scroll.Phase != ScrollPhase.Idle || scroll.Offset.Value != Vector2.zero)
                     StopScrollAt(scroll, Vector2.zero);
             }
-            else
+            else if ((scroll.Phase == ScrollPhase.Gliding || scroll.Phase == ScrollPhase.Springing)
+                     && step && scroll.Offset.SetOff != Time.frameCount)
             {
-                if (scroll.Phase == ScrollPhase.Dragging && scroll.Press == null)
-                    LetGo(scroll, Vector2.zero);
-                if ((scroll.Phase == ScrollPhase.Gliding || scroll.Phase == ScrollPhase.Springing)
-                    && step && scroll.Offset.SetOff != Time.frameCount && scroll.Step(dt))
+                if (scroll.Step(dt))
                     StopScrollAt(scroll, scroll.Offset.Target, arrived: true);
+                if (scroll.Impacted)
+                    s_impacts.Add(state);
             }
             if (scroll.Offset.Value != scroll.Raised)
                 QueueScrolled(state);
@@ -1874,26 +2158,168 @@ namespace TimboJimbo.UI.Layout
             }
         }
 
-        // ── For LayoutScroller ───────────────────────────────────────────────────
+        // ── Dragging ─────────────────────────────────────────────────────────────
 
-        // A press on a scroll container, or on anything in it that does not take drags itself, sent before any drag:
-        // gliding from a flick, or springing back from an end, it stops where it is drawn, as touching a UIScrollView
-        // stops it. (A wheel's step or a scroll sent by ScrollTo is left to finish, and the press clicks as any would:
-        // stopping it would only swallow a click made just after.) A press that stops it is only that: a button under
-        // it does not click. The press becomes the container's own, so its release comes back to it (UGUI sends a
-        // pointer-up only to what took the press), and whatever took it first is let go of at once. It then holds the
-        // offset until it drags it, or lets go (OnScrollRelease): in range it stays there, past an end it springs back.
-        // Only the left button (and touch) scrolls, as with ScrollRect.
-        internal static void OnScrollPress(LayoutNode node, PointerEventData eventData)
+        // A drag is shared by participants: scroll containers (a node whose Scroll is not None; they need no code) and
+        // drag owners (an ILayoutDraggable on the node it moves: a sheet's height, a card's pull), UIKit's behaviour on
+        // Android's nested scrolling. UGUI gives all of a drag to the innermost drag handler under the press, which is the
+        // LayoutScroller the system puts on each container and on each owner's node, and that hands it here. As it sets
+        // off it is locked to the axis it set off along (both, when the first participant up from the press takes both),
+        // and its chain is built: the participants up the hierarchy from the press that take that axis, innermost first (a
+        // node's container, then its owner, which sits just outside its own scroll), as far as the first object holding a
+        // drag handler that is not the system's, which UGUI gives the drags that start below it. With none, the drag goes
+        // to that handler, or else to the participants that take the other axis. An owner in the chain whose
+        // PassOnMidDrag is false makes the drag one participant's, the innermost with room to move the way it sets off
+        // (Decide); otherwise each move is shared out (Share). Let go, whatever moved last takes the pointer's velocity
+        // (EndDrag), and a glide that then runs into an end hands its speed on to what is above it (HandOn). The system
+        // never catches or flings an owner: its own code does, as it is told OnBeginDrag and OnRelease. The wheel goes
+        // to containers alone (OnWheel).
+
+        // How a scroll container takes its share of a move (Share): what brings it back to the end it is stretched past;
+        // what keeps it within range; or all of it, past an end.
+        private enum Taking
         {
-            if (eventData.button != PointerEventData.InputButton.Left || !TryScrolling(node, out var state)) return;
-            var scroll = state.Scroll;
-            bool flicked = scroll.Phase == ScrollPhase.Gliding
-                || (scroll.Phase == ScrollPhase.Springing && !scroll.Wheeling && scroll.Offset.Transition == null);
-            if (!flicked) return;
-            TakeHold(scroll, eventData);
+            Relax,
+            Within,
+            Stretch,
+        }
+
+        // One participant in a drag: State's scroll container, or its drag owner (Owner).
+        private sealed class Participant
+        {
+            public NodeState State;
+
+            // The owner as it was when it joined; null for a scroll container.
+            public ILayoutDraggable Owner;
+
+            // The axes it takes (its Scroll or its DragAxis), and those of them it moves along in this drag.
+            public bool TakesX;
+            public bool TakesY;
+            public bool X;
+            public bool Y;
+
+            // A container: whether this drag holds its offset (a move has reached it, or the press stopped it), and
+            // whether something has let it go of it since (a ScrollTo, it stopping scrolling), after which it is passed
+            // over for the rest of the drag.
+            public bool Held;
+            public bool Dropped;
+
+            // An owner: whether it has been told OnBeginDrag, and so is told OnRelease.
+            public bool Begun;
+
+            // Whether it took some of the move being shared.
+            public bool Took;
+        }
+
+        // A press that stopped or caught something, or a drag the system took, until it lets go.
+        private sealed class Drag
+        {
+            public PointerEventData Press;
+
+            // The LayoutScroller UGUI sends it to, and the node that is on (the one the press reached).
+            public LayoutScroller Scroller;
+            public NodeState Origin;
+
+            // Before it sets off, what the press stopped or took hold of; after, its chain, innermost first.
+            public readonly List<Participant> Parts = new();
+            public bool SetOff;
+
+            // When it is one participant's, that one (null when it is shared): the chain is then that one alone.
+            public Participant Sole;
+
+            // The axes it moves along.
+            public bool X;
+            public bool Y;
+
+            // What took the last part of the last move anything took (at first, when it is one participant's, that one).
+            public Participant Last;
+
+            // Where the pointer was as it set off, and whether no move has come since: the move UGUI sends with the set-off
+            // is the one that crossed its threshold, and it is not shared, so nothing the drag moves jumps by it.
+            public Vector2 SetOffAt;
+            public bool Fresh;
+
+            // The pointer's velocity in world units a second, smoothed over the last few moves as DragGesture's is, and
+            // when it last moved (unscaled seconds).
+            public Vector3 Velocity;
+            public bool Sampled;
+            public float LastMoved;
+        }
+
+        // What is left of a move smaller than this much of it is rounding from turning it into a participant's units and
+        // back, not something left over for the next participant.
+        private const float Rounding = 1e-4f;
+
+        // The drags and presses under way, and spare ones and participants to reuse, so a drag allocates nothing.
+        private static readonly List<Drag> s_drags = new();
+        private static readonly Stack<Drag> s_dragPool = new();
+        private static readonly Stack<Participant> s_partPool = new();
+
+        // Scratch: a chain being built, what a press stopped or caught that is not in it, the nodes a press, a drag or a
+        // wheel reaches (Reach), and one object's event handlers.
+        private static readonly List<Participant> s_chain = new();
+        private static readonly List<Participant> s_left = new();
+        private static readonly List<NodeState> s_reach = new();
+        private static readonly List<IEventSystemHandler> s_handlers = new();
+
+        // Scroll containers whose glide ran into an end in this frame's step, for what is above them to take its speed.
+        private static readonly List<NodeState> s_impacts = new();
+
+        // A press on a node with a LayoutScroller, or on anything in it that does not take drags itself, sent before any
+        // drag. Every scroll container it reaches (Reach) that is gliding from a flick, or springing back from an end,
+        // stops where it is drawn, whichever way it scrolls, as touching a UIScrollView, or one inside it, stops it. A
+        // wheel's step or a scroll sent by ScrollTo is left to finish, and the press clicks as any would: stopping it would
+        // only swallow a click made just after. Then every drag owner it reaches whose node is moving is asked whether it
+        // takes hold of the press (TakesHold), where it landed being the owner's to judge, and one that does is told at once
+        // (OnBeginDrag), to stop where it is drawn: a sheet takes hold of a press on its header and not of one on its list,
+        // so a row tapped while the sheet settles still clicks, for the same reason. The containers go first, the system's
+        // own work, so an owner's code runs once they are all stopped. A press that stops anything, or that anything takes
+        // hold of, is only that: a button under it does not click, and it becomes the LayoutScroller's own, so its release
+        // comes back to it (UGUI sends a pointer-up only to what took the press), and whatever took it first is let go of
+        // at once. What it stopped or caught is held until a drag sets off from it or it lets go (OnPointerUp). Only the
+        // left button (and touch) drags, as with ScrollRect.
+        internal static void OnPointerPress(LayoutScroller scroller, LayoutNode node, PointerEventData eventData)
+        {
+            if (eventData.button != PointerEventData.InputButton.Left || !TryPointer(node, out var origin)) return;
+            // A press of the same pointer that was never let go of (its release went elsewhere) lets go first.
+            var stale = FindDrag(eventData);
+            if (stale != null)
+                EndDrag(stale, Vector3.zero);
+
+            Drag drag = null;
+            Reach(origin, false);
+            for (int i = 0; i < s_reach.Count; i++)
+            {
+                var state = s_reach[i];
+                var scroll = state.Scroll;
+                if (scroll == null || scroll.Axis == ScrollAxis.None) continue;
+                bool flicked = scroll.Phase == ScrollPhase.Gliding
+                    || (scroll.Phase == ScrollPhase.Springing && !scroll.Wheeling && scroll.Offset.Transition == null);
+                if (!flicked) continue;
+                drag ??= StartDrag(eventData, scroller, origin);
+                TakeHold(scroll, eventData);
+                var part = NewPart(state, null, scroll.Scrolls(0), scroll.Scrolls(1));
+                part.Held = true;
+                drag.Parts.Add(part);
+            }
+            for (int i = 0; i < s_reach.Count; i++)
+            {
+                var state = s_reach[i];
+                var owner = state.Draggable;
+                if (!Live(state) || !IsLive(owner) || owner.DragAxis == ScrollAxis.None || !IsMoving(state)
+                    || OwnerHeld(state, null) || !owner.TakesHold(eventData))
+                    continue;
+                drag ??= StartDrag(eventData, scroller, origin);
+                var axis = owner.DragAxis;
+                var part = NewPart(state, owner, Along(axis, 0), Along(axis, 1));
+                part.Begun = true;
+                drag.Parts.Add(part);
+                owner.OnBeginDrag();
+            }
+            if (drag == null) return;
+
             eventData.eligibleForClick = false;
-            var self = node.gameObject;
+            var self = scroller.gameObject;
             if (eventData.pointerPress != self)
             {
                 if (eventData.pointerPress != null)
@@ -1903,112 +2329,930 @@ namespace TimboJimbo.UI.Layout
             FlushIfIdle();
         }
 
-        // The press let go. One that dragged lets go in OnEndDrag, sent after this, at the velocity it was dragged at;
-        // one that stopped a glide and never dragged lets go here, at a standstill: in range it stays, past an end it
-        // springs back.
-        internal static void OnScrollRelease(LayoutNode node, PointerEventData eventData)
+        // The pointer let go. A press that stopped or caught something and never dragged lets go of it here, at a
+        // standstill: a container in range stays, one past an end springs back, and an owner is told OnRelease(zero). One
+        // that dragged lets go in OnDragEnd, which UGUI sends after this; and a press on a Button that shares a
+        // LayoutScroller's object comes here too, with nothing to let go of. Only the LayoutScroller the press became
+        // (`scroller`) lets it go: the one on a pressed Button's object above it (a sheet's, which a tap on its list
+        // reaches) hears the pointer-up that OnPointerPress sends that Button as the press is taken over, which is not the
+        // pointer letting go.
+        internal static void OnPointerUp(LayoutScroller scroller, PointerEventData eventData)
         {
-            if (eventData.button != PointerEventData.InputButton.Left || !TryScrolling(node, out var state)) return;
-            var scroll = state.Scroll;
-            if (scroll.Phase != ScrollPhase.Dragging || scroll.Press != eventData || scroll.Dragged) return;
-            LetGo(scroll, Vector2.zero);
-            FlushIfIdle();
+            if (eventData.button != PointerEventData.InputButton.Left || !Application.isPlaying) return;
+            var drag = FindDrag(eventData);
+            if (drag != null && !drag.SetOff && drag.Scroller == scroller)
+                EndDrag(drag, Vector3.zero);
         }
 
-        // A drag setting off, past UGUI's drag threshold. Unless another press is dragging the container already, or
-        // this one sets off mostly along an axis it does not scroll (left to nothing, for now), the container follows
-        // it from where the pointer is now (not from the press, so it does not jump by the threshold), stopping
-        // whatever else it was doing.
-        internal static void OnScrollBeginDrag(LayoutNode node, PointerEventData eventData)
+        // A drag setting off past UGUI's drag threshold from a press on `node` (or handed to its LayoutScroller by a drag
+        // handler below that did not want it). Its axis is the one it set off along, in the node's units, or both when the
+        // first participant up from the press takes both, and its chain is the participants up from the press that take
+        // one of its axes (Collect, Lock). With none, it goes to the first drag handler above that is not the system's, as
+        // it sets off: passed on part way through, that handler would start mid-gesture with none of the drag's velocity.
+        // With none of those either the lock gives way, and the participants that take the other axis take it, by how far
+        // it goes that way; with none of those, it is dropped. Then the hand-off switch (Decide); what the press stopped
+        // or caught that is not in the chain is let go of at a standstill (Join); each owner in the chain not begun yet is
+        // begun; and the press stops being a click: once a drag sets off, the Input System's UI module cancels a click
+        // only when what was pressed is not the drag handler's object, and a Button can share one with a LayoutScroller
+        // (an App Store card does), which would otherwise click after dragging the list under it. A container takes hold
+        // of its offset only as a move first reaches it (Share), so an outer list springing for a ScrollTo is left alone
+        // by a drag that never reaches it.
+        internal static void OnDragSetOff(LayoutScroller scroller, LayoutNode node, PointerEventData eventData)
         {
-            if (eventData.button != PointerEventData.InputButton.Left || !TryScrolling(node, out var state)) return;
-            var scroll = state.Scroll;
-            if (scroll.Phase == ScrollPhase.Dragging && scroll.Dragged && scroll.Press != eventData) return;
-            var camera = eventData.pressEventCamera;
-            if (!LocalPoint(state, eventData.position, camera, out var cursor)
-                || !LocalPoint(state, eventData.pressPosition, camera, out var pressed))
+            if (eventData.button != PointerEventData.InputButton.Left || !TryPointer(node, out var origin)) return;
+            var drag = FindDrag(eventData);
+            if (drag != null && drag.SetOff)
+            {
+                EndDrag(drag, Vector3.zero);
+                drag = null;
+            }
+            drag ??= StartDrag(eventData, scroller, origin);
+            if (!WorldMove(origin.RectTransform, eventData.pressPosition, eventData.position, eventData.pressEventCamera, out var setOff))
+            {
+                EndDrag(drag, Vector3.zero);
                 return;
-            var moved = cursor - pressed;
-            if (scroll.Axis == ScrollAxis.Vertical && Mathf.Abs(moved.x) > Mathf.Abs(moved.y)) return;
-            if (scroll.Axis == ScrollAxis.Horizontal && Mathf.Abs(moved.y) > Mathf.Abs(moved.x)) return;
-            if (scroll.Phase != ScrollPhase.Dragging || scroll.Press != eventData)
-                TakeHold(scroll, eventData);
-            scroll.BeginDrag(cursor, Time.unscaledTime);
+            }
+
+            var foreign = Reach(origin, false);
+            var chain = s_chain;
+            Collect(drag, chain);
+            Vector2 local = origin.RectTransform.InverseTransformVector(setOff);
+            bool both = chain.Count > 0 && chain[0].TakesX && chain[0].TakesY;
+            drag.X = both || Mathf.Abs(local.x) > Mathf.Abs(local.y);
+            drag.Y = both || !drag.X;
+            bool taken = Lock(drag, chain);
+            if (!taken && foreign != null)
+            {
+                RecycleAll(chain);
+                EndDrag(drag, Vector3.zero);
+                eventData.pointerDrag = foreign;
+                ExecuteEvents.Execute(foreign, eventData, ExecuteEvents.beginDragHandler);
+                return;
+            }
+            if (!taken && !both)
+            {
+                drag.X = !drag.X;
+                drag.Y = !drag.Y;
+                taken = Lock(drag, chain);
+            }
+            if (!taken)
+            {
+                RecycleAll(chain);
+                EndDrag(drag, Vector3.zero);
+                return;
+            }
+            // Only what moves along one of its axes takes part.
+            for (int i = chain.Count - 1; i >= 0; i--)
+            {
+                if (chain[i].X || chain[i].Y) continue;
+                Recycle(chain[i]);
+                chain.RemoveAt(i);
+            }
+            Decide(drag, chain, setOff);
+
+            drag.SetOff = true;
+            drag.SetOffAt = eventData.position;
+            drag.Fresh = true;
+            drag.Velocity = Vector3.zero;
+            drag.Sampled = false;
+            drag.LastMoved = Time.unscaledTime;
+            eventData.eligibleForClick = false;
+            Join(drag, chain);
+            drag.Last = drag.Sole;
+            var parts = drag.Parts;
+            for (int i = 0; i < parts.Count; i++)
+            {
+                var part = parts[i];
+                if (part.Owner == null || part.Begun || !IsLive(part.Owner)) continue;
+                part.Begun = true;
+                part.Owner.OnBeginDrag();
+            }
             FlushIfIdle();
         }
 
-        // The pointer dragging it moved: the offset follows, the pointer's movement brought into its local units.
-        internal static void OnScrollDrag(LayoutNode node, PointerEventData eventData)
+        // A move of a drag the system took: the pointer's velocity is sampled from it, over the time since the pointer last
+        // moved (which can be several frames, when the pointer reports less often than the game draws), smoothed over the
+        // last few moves, and it is shared out among the drag's participants (Share). A move is UGUI's pointer delta
+        // (which add up exactly to where the pointer went), taken onto the plane of the node pressed in world units.
+        internal static void OnDragMove(PointerEventData eventData)
         {
-            if (eventData.button != PointerEventData.InputButton.Left || !TryScrolling(node, out var state)) return;
-            var scroll = state.Scroll;
-            if (scroll.Phase != ScrollPhase.Dragging || !scroll.Dragged || scroll.Press != eventData) return;
-            if (LocalPoint(state, eventData.position, eventData.pressEventCamera, out var cursor))
-                scroll.Drag(cursor, Time.unscaledTime);
+            if (eventData.button != PointerEventData.InputButton.Left || !Application.isPlaying) return;
+            var drag = FindDrag(eventData);
+            if (drag == null || !drag.SetOff) return;
+            if (drag.Fresh)
+            {
+                drag.Fresh = false;
+                if (eventData.position == drag.SetOffAt) return;
+            }
+            var plane = drag.Origin.RectTransform;
+            if (plane == null || !WorldMove(plane, eventData.position - eventData.delta, eventData.position,
+                    eventData.pressEventCamera, out var move))
+                return;
+            float now = Time.unscaledTime, dt = now - drag.LastMoved;
+            if (dt > 1e-4f)
+            {
+                var sample = move / dt;
+                drag.Velocity = drag.Sampled ? Vector3.Lerp(drag.Velocity, sample, 0.5f) : sample;
+                drag.Sampled = true;
+            }
+            drag.LastMoved = now;
+            Share(drag, move);
+            FlushIfIdle();
         }
 
-        // The drag let go: it glides or springs on at the velocity it was dragged at (none if held still first).
-        internal static void OnScrollEndDrag(LayoutNode node, PointerEventData eventData)
+        // A drag the system took let go: at the pointer's velocity, or at a standstill if it was held still first.
+        internal static void OnDragEnd(PointerEventData eventData)
         {
-            if (eventData.button != PointerEventData.InputButton.Left || !TryScrolling(node, out var state)) return;
-            var scroll = state.Scroll;
-            if (scroll.Phase != ScrollPhase.Dragging || scroll.Press != eventData) return;
-            LetGo(scroll, scroll.ReleaseVelocity(Time.unscaledTime));
+            if (eventData.button != PointerEventData.InputButton.Left || !Application.isPlaying) return;
+            var drag = FindDrag(eventData);
+            if (drag == null || !drag.SetOff) return;
+            EndDrag(drag, Time.unscaledTime - drag.LastMoved > ScrollState.StillFor ? Vector3.zero : drag.Velocity);
         }
 
-        // A mouse wheel or trackpad: a notch scrolls the wheel step (positive y towards the start, as ScrollRect reads
-        // it), added to the wheel's own target while it is still springing there (so notches add up rather than each
-        // starting from where it is drawn), within range, on a quick spring from where it is at the speed it has. A
-        // vertical container takes y; a horizontal one x, or y when there is no x (a plain wheel scrolls it too); one
-        // that scrolls both takes both. The Input System's UI module scales scrollDelta by its scrollDeltaPerTick (6 a
-        // notch by default) and the legacy one does not (1 a notch), so it is brought back to notches by the module's
-        // own ConvertPointerEventScrollDeltaToTicks: a notch is the same step whichever is in use.
-        internal static void OnScrollWheel(LayoutNode node, PointerEventData eventData)
+        // Every participant a drag from the press can reach (Reach, just made), innermost first: a node's scroll
+        // container, then its drag owner, which sits just outside its own scroll. A container another press holds, and an
+        // owner another drag has begun, are left out (a participant already held takes no part in a new drag), as is an
+        // owner that is disabled or says DragAxis None.
+        private static void Collect(Drag drag, List<Participant> into)
         {
-            if (!TryScrolling(node, out var state)) return;
-            var scroll = state.Scroll;
-            if (scroll.Phase == ScrollPhase.Dragging || !scroll.Measured) return;
+            for (int i = 0; i < s_reach.Count; i++)
+            {
+                var state = s_reach[i];
+                var scroll = state.Scroll;
+                if (scroll != null && scroll.Axis != ScrollAxis.None
+                    && (scroll.Phase != ScrollPhase.Dragging || scroll.Press == drag.Press))
+                    into.Add(NewPart(state, null, scroll.Scrolls(0), scroll.Scrolls(1)));
+                var owner = state.Draggable;
+                if (!IsLive(owner) || OwnerHeld(state, drag)) continue;
+                var axis = owner.DragAxis;
+                if (axis != ScrollAxis.None)
+                    into.Add(NewPart(state, owner, Along(axis, 0), Along(axis, 1)));
+            }
+        }
 
+        // Gives each participant the drag's axes it takes, which it moves along; returns whether any moves along one.
+        private static bool Lock(Drag drag, List<Participant> chain)
+        {
+            bool any = false;
+            for (int i = 0; i < chain.Count; i++)
+            {
+                var part = chain[i];
+                part.X = drag.X && part.TakesX;
+                part.Y = drag.Y && part.TakesY;
+                any |= part.X || part.Y;
+            }
+            return any;
+        }
+
+        // The hand-off switch. With no owner in the chain whose PassOnMidDrag is false, the drag is shared (Share). With
+        // one, the drag is one participant's until it lets go (Sole), chosen as it sets off, as nested UIScrollViews and
+        // Android's nested scrolling give a drag to the innermost view that can scroll the way it goes. An owner this
+        // press took hold of (TakesHold) has it, the innermost if more than one did. Otherwise the innermost such owner
+        // decides over everything inside it, nothing outside it taking part: the drag is the first participant from the
+        // press up to it, innermost first, with room to move the way the drag set off within its own range (HasRoom), a
+        // container then scrolling, rubber-banding at either end, and an owner banding itself; and with nothing that has
+        // room, it is the innermost participant's, as a UIScrollView bounces the drag nothing outside it can take: a list
+        // at its bottom bounces in a sheet at full, and a drag on the sheet's own header stretches it. Whether anything
+        // is moving plays no part: a sheet settling to a detent does not take a drag its list has room for. What is not
+        // chosen is not begun, and does not move until the next drag.
+        private static void Decide(Drag drag, List<Participant> chain, Vector3 setOff)
+        {
+            int decider = -1;
+            for (int i = 0; i < chain.Count && decider < 0; i++)
+            {
+                if (chain[i].Owner != null && !chain[i].Owner.PassOnMidDrag)
+                    decider = i;
+            }
+            if (decider < 0) return;
+
+            int sole = -1;
+            for (int i = 0; i < chain.Count && sole < 0; i++)
+            {
+                if (chain[i].Owner != null && Caught(drag, chain[i].State))
+                    sole = i;
+            }
+            for (int i = 0; i <= decider && sole < 0; i++)
+            {
+                if (HasRoom(chain[i], setOff))
+                    sole = i;
+            }
+            if (sole < 0)
+                sole = 0;
+            drag.Sole = chain[sole];
+            for (int i = 0; i < chain.Count; i++)
+            {
+                if (i != sole)
+                    Recycle(chain[i]);
+            }
+            chain.Clear();
+            chain.Add(drag.Sole);
+        }
+
+        // Whether a participant has room to move the way a drag set off (`setOff`, world units) within its own range: a
+        // scroll container that is not at its end that way on one of the drag's axes it moves along (a list at its top
+        // has none for a drag pulling down, one held past an end none further past it, and one not laid out yet none at
+        // all), or an owner that says so (ILayoutDraggable.HasRoom), asked in its node's parent's units as OnDrag is.
+        private static bool HasRoom(Participant part, Vector3 setOff)
+        {
+            var state = part.State;
+            if (part.Owner == null)
+            {
+                var scroll = state.Scroll;
+                var way = OffsetMoveOf(state, setOff);
+                return (part.X && !scroll.AtEnd(0, way.x)) || (part.Y && !scroll.AtEnd(1, way.y));
+            }
+            var space = state.RectTransform.parent;
+            if (space == null) return false;
+            var direction = Mask(space.InverseTransformVector(setOff), part.X, part.Y);
+            return direction != Vector2.zero && part.Owner.HasRoom(direction);
+        }
+
+        // Whether the owner on a node took hold of a drag's press (it is begun already), read before the chain takes over.
+        private static bool Caught(Drag drag, NodeState state)
+        {
+            var parts = drag.Parts;
+            for (int i = 0; i < parts.Count; i++)
+            {
+                if (parts[i].Owner != null && parts[i].Begun && parts[i].State == state)
+                    return true;
+            }
+            return false;
+        }
+
+        // The chain takes over from what the press stopped or caught: each carries on in it as the same participant
+        // (held, or begun and not begun again), and what is not in it is let go of at a standstill there and then,
+        // containers first, as EndDrag does.
+        private static void Join(Drag drag, List<Participant> chain)
+        {
+            var parts = drag.Parts;
+            for (int i = 0; i < parts.Count; i++)
+            {
+                var pressed = parts[i];
+                Participant same = null;
+                for (int j = 0; j < chain.Count && same == null; j++)
+                {
+                    var part = chain[j];
+                    if (part.State == pressed.State && (part.Owner == null) == (pressed.Owner == null))
+                        same = part;
+                }
+                if (same == null)
+                {
+                    s_left.Add(pressed);
+                    continue;
+                }
+                same.Held = pressed.Held;
+                same.Begun = pressed.Begun;
+                Recycle(pressed);
+            }
+            parts.Clear();
+            parts.AddRange(chain);
+            chain.Clear();
+
+            for (int i = 0; i < s_left.Count; i++)
+            {
+                var part = s_left[i];
+                if (part.Owner == null && Holds(drag, part))
+                    LetGo(part.State, Vector2.zero);
+            }
+            for (int i = 0; i < s_left.Count; i++)
+            {
+                var part = s_left[i];
+                if (part.Owner != null && part.Begun && Live(part.State) && IsLive(part.Owner))
+                    part.Owner.OnRelease(Vector2.zero);
+            }
+            RecycleAll(s_left);
+        }
+
+        // Shares one move of a drag (world units) out among its participants, UIKit's order on Android's mechanism. Each
+        // takes its share in its own units, through its RectTransform as drawn (a container its own, an owner its node's
+        // parent's, where its Offset and Height are), and what it leaves goes on in world units. A drag that is one
+        // participant's goes to it alone: a container takes all of it, rubber-banding past its ends, and an owner is
+        // offered it first and then what it left, and what it leaves is dropped. Otherwise: a container stretched past an
+        // end takes first what brings it back to that end; then the owners, outermost first, are offered it before
+        // anything inside them scrolls (a sheet below full grows, a pulled card comes back); then up the chain, innermost
+        // first, each container takes what its range allows and each owner is offered what is left (a list scrolls to its
+        // top, then the sheet shrinks); and what is still left stretches the outermost container on its axis past its end.
+        // Owners never get the system's rubber band: one that takes a move it has no room for bands it itself, and as it
+        // is outside the containers it owns, that keeps the stretch at the outermost. Each container the drag holds then
+        // moves at the pointer's velocity if it took some of the move (times its rubber band's slope), and is held still
+        // if it took none, so a change that retargets it sets off at the speed it is moving.
+        private static void Share(Drag drag, Vector3 move)
+        {
+            var parts = drag.Parts;
+            float tiny = move.magnitude * Rounding;
+            for (int i = 0; i < parts.Count; i++)
+                parts[i].Took = false;
+
+            if (drag.Sole != null)
+            {
+                var part = drag.Sole;
+                if (part.Owner == null)
+                {
+                    ScrollShare(drag, part, move, Taking.Stretch, true, true);
+                }
+                else
+                {
+                    var took = Offer(part, move, true);
+                    Offer(part, WithoutRounding(move - took, tiny), false);
+                }
+            }
+            else
+            {
+                Participant last = null;
+                for (int i = 0; i < parts.Count; i++)
+                {
+                    var part = parts[i];
+                    if (part.Owner == null && Stretched(drag, part))
+                        Deduct(ref move, ref last, part, ScrollShare(drag, part, move, Taking.Relax, true, true), tiny);
+                }
+                for (int i = parts.Count - 1; i >= 0; i--)
+                {
+                    var part = parts[i];
+                    if (part.Owner != null)
+                        Deduct(ref move, ref last, part, Offer(part, move, true), tiny);
+                }
+                for (int i = 0; i < parts.Count; i++)
+                {
+                    var part = parts[i];
+                    var taken = part.Owner == null
+                        ? ScrollShare(drag, part, move, Taking.Within, true, true)
+                        : Offer(part, move, false);
+                    Deduct(ref move, ref last, part, taken, tiny);
+                }
+                for (int axis = 0; axis < 2; axis++)
+                {
+                    for (int i = parts.Count - 1; i >= 0; i--)
+                    {
+                        var part = parts[i];
+                        if (part.Owner != null || !(axis == 0 ? part.X : part.Y) || !Usable(drag, part)) continue;
+                        Deduct(ref move, ref last, part, ScrollShare(drag, part, move, Taking.Stretch, axis == 0, axis == 1), tiny);
+                        break;
+                    }
+                }
+                if (last != null)
+                    drag.Last = last;
+            }
+
+            for (int i = 0; i < parts.Count; i++)
+            {
+                var part = parts[i];
+                if (part.Owner != null || !Holds(drag, part)) continue;
+                var scroll = part.State.Scroll;
+                scroll.Offset.Velocity = part.Took ? Vector2.Scale(OffsetShare(part, drag.Velocity), scroll.Slope()) : Vector2.zero;
+            }
+        }
+
+        // What a participant took comes off the move; one that took some is what moved last, so far.
+        private static void Deduct(ref Vector3 move, ref Participant last, Participant part, Vector3 taken, float tiny)
+        {
+            if (taken == Vector3.zero) return;
+            move = WithoutRounding(move - taken, tiny);
+            last = part;
+        }
+
+        // A scroll container's share of a move (world units), in its offset's units on the drag's axes it moves along (of
+        // those, `x` and `y`), taken as `taking` says once the drag holds it (it takes hold as the first share reaches it,
+        // stopping whatever it was doing and letting go of any change it was springing for). Returns what it took, in
+        // world units.
+        private static Vector3 ScrollShare(Drag drag, Participant part, Vector3 move, Taking taking, bool x, bool y)
+        {
+            if (!Usable(drag, part)) return Vector3.zero;
+            var share = OffsetShare(part, move, x, y);
+            if (share == Vector2.zero) return Vector3.zero;
+            var scroll = part.State.Scroll;
+            if (!part.Held)
+            {
+                TakeHold(scroll, drag.Press);
+                part.Held = true;
+            }
+            var taken = taking == Taking.Relax ? scroll.Relax(share)
+                : taking == Taking.Within ? scroll.Take(share)
+                : scroll.Stretch(share);
+            if (taken == Vector2.zero) return Vector3.zero;
+            part.Took = true;
+            return WorldOfOffsetMove(part.State, taken);
+        }
+
+        // Offers a drag owner a move (world units) on the drag's axes it moves along, in its node's parent's units, before
+        // the containers inside it take any (`first`) or with what they left, and returns what it took, in world units:
+        // never more than it was offered, nor the other way. One that has gone, or whose node takes no pointer now (moving
+        // for a change that is not interactive), is passed over.
+        private static Vector3 Offer(Participant part, Vector3 move, bool first)
+        {
+            var state = part.State;
+            if (!part.Begun || !Live(state) || !IsLive(part.Owner) || state.PassBlocked) return Vector3.zero;
+            var space = state.RectTransform.parent;
+            if (space == null) return Vector3.zero;
+            var offered = Mask(space.InverseTransformVector(move), part.X, part.Y);
+            if (offered == Vector2.zero) return Vector3.zero;
+            var took = part.Owner.OnDrag(offered, first);
+            took = new Vector2(Within(took.x, offered.x), Within(took.y, offered.y));
+            if (took == Vector2.zero) return Vector3.zero;
+            part.Took = true;
+            return space.TransformVector(took);
+        }
+
+        // What an owner says it took of what it was offered on one axis, kept between nothing and all of it.
+        private static float Within(float took, float offered) =>
+            offered >= 0f ? Mathf.Clamp(took, 0f, offered) : Mathf.Clamp(took, offered, 0f);
+
+        // Whether a scroll container can take a share of a drag's move now: the drag holds it, or it is free to take hold
+        // of (no other press holds it). One that something let go of since the drag held it (a ScrollTo or ScrollOffset,
+        // it stopping scrolling, its node going) is passed over from then on; one that takes no pointer now (moving for a
+        // change that is not interactive), only for now.
+        private static bool Usable(Drag drag, Participant part)
+        {
+            if (part.Dropped) return false;
+            if (part.Held && !Holds(drag, part))
+            {
+                part.Dropped = true;
+                return false;
+            }
+            var state = part.State;
+            if (!part.Held && (!Live(state) || state.Scroll.Axis == ScrollAxis.None || state.Scroll.Phase == ScrollPhase.Dragging))
+                return false;
+            return !state.PassBlocked;
+        }
+
+        // Whether a drag holds a scroll container it took hold of: still held by its press, and still scrolling.
+        private static bool Holds(Drag drag, Participant part)
+        {
+            if (!part.Held || part.Dropped || !Live(part.State)) return false;
+            var scroll = part.State.Scroll;
+            return scroll.Axis != ScrollAxis.None && scroll.Phase == ScrollPhase.Dragging && scroll.Press == drag.Press;
+        }
+
+        // Whether a scroll container is stretched past an end: by its raw offset while the drag holds it, and where it is
+        // drawn otherwise (springing back from past one).
+        private static bool Stretched(Drag drag, Participant part)
+        {
+            var scroll = part.State.Scroll;
+            var raw = Holds(drag, part) ? scroll.Raw : scroll.Offset.Value;
+            return raw != scroll.Clamp(raw);
+        }
+
+        // A drag or a press lets go, at `velocity` (world units a second; zero for a standstill), which goes to what moved
+        // last: a container glides at it (in its units, times its rubber band's slope if it is stretched, so one past an
+        // end springs back carrying what is drawn), and an owner is told OnRelease(velocity). Everything else is let go of
+        // at a standstill: a container stays where it is (or springs back from past an end), and an owner is told
+        // OnRelease(zero) and settles. Every container first, then the owners, innermost first: an owner's OnRelease may
+        // start a change that moves a container (a card closing scrolls its story back to the top inside Animate), which
+        // letting that container go after would undo. An owner that does not take the velocity passes it on up the chain:
+        // a container outside it glides on at it if it can (GlideOn), and an owner outside it is offered it in place of
+        // zero. What has gone since (a node disabled, an owner disabled or destroyed) is passed over.
+        private static void EndDrag(Drag drag, Vector3 velocity)
+        {
+            s_drags.Remove(drag);
+            var parts = drag.Parts;
+            var last = drag.SetOff ? drag.Last : null;
+            for (int i = 0; i < parts.Count; i++)
+            {
+                var part = parts[i];
+                if (part.Owner != null || !Holds(drag, part)) continue;
+                var scroll = part.State.Scroll;
+                LetGo(part.State, part == last ? Vector2.Scale(OffsetShare(part, velocity), scroll.Slope()) : Vector2.zero);
+            }
+            var carry = Vector3.zero;
+            float tiny = velocity.magnitude * Rounding;
+            for (int i = 0; i < parts.Count; i++)
+            {
+                var part = parts[i];
+                if (part.Owner == null)
+                {
+                    if (carry != Vector3.zero && Live(part.State))
+                        carry = WithoutRounding(carry - GlideOn(part.State, carry, part.X, part.Y), tiny);
+                    continue;
+                }
+                if (!part.Begun || !Live(part.State) || !IsLive(part.Owner)) continue;
+                if (part == last)
+                    carry = part.Owner.OnRelease(velocity) ? Vector3.zero : velocity;
+                else if (carry != Vector3.zero)
+                    carry = part.Owner.OnRelease(carry) ? Vector3.zero : carry;
+                else
+                    part.Owner.OnRelease(Vector2.zero);
+            }
+            Recycle(drag);
+            FlushIfIdle();
+        }
+
+        // A drag whose LayoutScroller has gone (disabled or destroyed) never hears UGUI's OnEndDrag, nor a press its
+        // pointer-up: it lets go here, at a standstill, owners told OnRelease(zero) too, so a sheet is never left between
+        // detents.
+        private static void EndLostDrags()
+        {
+            for (int i = s_drags.Count - 1; i >= 0; i--)
+            {
+                if (i >= s_drags.Count) continue;
+                var drag = s_drags[i];
+                if (drag.Scroller == null || !drag.Scroller.isActiveAndEnabled)
+                    EndDrag(drag, Vector3.zero);
+            }
+        }
+
+        // Hands a scroll container a glide at `speed` (world units a second, the way its content moves, as a finger moving
+        // it would), on the axes it scrolls (of `x` and `y`) where it is at rest or gliding and not at its end the way the
+        // speed goes: it glides on at it from where it is drawn, and notes what above it could take the glide on in turn.
+        // Held by a press, or springing, it takes none. Returns what it took, in world units a second.
+        private static Vector3 GlideOn(NodeState state, Vector3 speed, bool x, bool y)
+        {
+            var scroll = state.Scroll;
+            if (scroll == null || scroll.Axis == ScrollAxis.None
+                || (scroll.Phase != ScrollPhase.Idle && scroll.Phase != ScrollPhase.Gliding))
+                return Vector3.zero;
+            var velocity = OffsetMoveOf(state, speed);
+            var value = scroll.Offset.Value;
+            var taken = Vector2.zero;
+            for (int axis = 0; axis < 2; axis++)
+            {
+                float v = velocity[axis];
+                if (!(axis == 0 ? x : y) || !scroll.Scrolls(axis) || v == 0f || scroll.AtEnd(axis, v)) continue;
+                // An axis springing back from past an end while the other glides carries on back.
+                if (value[axis] < 0f || value[axis] > scroll.Range[axis]) continue;
+                taken[axis] = v;
+            }
+            if (taken == Vector2.zero) return Vector3.zero;
+            scroll.Glide(taken);
+            Hold(scroll.Offset, null);
+            NotePassOn(state);
+            return WorldOfOffsetMove(state, taken);
+        }
+
+        // Notes, as a scroll container is let go of or handed a glide, whether anything above it on each axis could take
+        // the speed of a glide of it that runs into an end (ScrollState.PassX and PassY): a scroll container above it that
+        // scrolls that way, or a drag owner that moves that way with PassOnMidDrag true (its own first, as it sits just
+        // outside its scroll). Inside an owner with PassOnMidDrag false that moves that way nothing is, on that axis,
+        // wherever it is: a drag on that axis inside such an owner is one participant's, so a glide from it bounces at the
+        // end and passes nothing on, not even to a container between it and that owner. With nothing, the glide bounces
+        // at the end, as a lone container's does.
+        private static void NotePassOn(NodeState state)
+        {
+            bool x = false, y = false, soleX = false, soleY = false;
+            Transform own = state.RectTransform;
+            for (var t = own; t != null && !(soleX && soleY); t = t.parent)
+            {
+                if (!t.TryGetComponent(out LayoutNode node) || !s_states.TryGetValue(node, out var above)) continue;
+                if (t != own && above.Scroll != null)
+                {
+                    x |= above.Scroll.Scrolls(0);
+                    y |= above.Scroll.Scrolls(1);
+                }
+                var owner = above.Draggable;
+                if (!IsLive(owner)) continue;
+                var axis = owner.DragAxis;
+                if (axis == ScrollAxis.None) continue;
+                if (owner.PassOnMidDrag)
+                {
+                    x |= Along(axis, 0);
+                    y |= Along(axis, 1);
+                }
+                else
+                {
+                    soleX |= Along(axis, 0);
+                    soleY |= Along(axis, 1);
+                }
+            }
+            var scroll = state.Scroll;
+            scroll.PassX = x && !soleX && scroll.Scrolls(0);
+            scroll.PassY = y && !soleY && scroll.Scrolls(1);
+        }
+
+        // Hands on the speed of each glide that ran into an end in this frame's step with something above it to take it,
+        // once the frame is laid out: owners' code may start changes, and Animate cannot run inside a pass. Up the
+        // hierarchy from the container, walked again now (its own owner first, as it sits just outside its scroll), each
+        // scroll container that can glide on at it does (GlideOn), and each owner with PassOnMidDrag true is offered the
+        // part along its DragAxis (OnRelease) and takes it by returning true, until it is all taken or an owner with
+        // PassOnMidDrag false that moves that way is met; an owner another press is dragging is passed over. What nothing
+        // takes bounces the container at the end it ran into, at that speed, as it would with nothing above it: not the
+        // outermost on that axis, since one above that declined may be nowhere near its own end. Returns whether anything
+        // took any, for the frame to be laid out again so that the taker is drawn this frame from where it is (only the
+        // rest of this one frame's motion is lost).
+        private static bool HandOn()
+        {
+            bool took = false;
+            while (s_impacts.Count > 0)
+            {
+                var state = s_impacts[0];
+                s_impacts.RemoveAt(0);
+                var scroll = state.Scroll;
+                if (!Live(state) || scroll == null || !scroll.Impacted) continue;
+                var impact = scroll.Impact;
+                scroll.Impacted = false;
+                scroll.Impact = Vector2.zero;
+                var left = WorldOfOffsetMove(state, impact);
+                float tiny = left.magnitude * Rounding;
+                Transform own = state.RectTransform;
+                for (var t = own; t != null && left != Vector3.zero; t = t.parent)
+                {
+                    if (!t.TryGetComponent(out LayoutNode node) || !s_states.TryGetValue(node, out var above)) continue;
+                    if (t != own)
+                    {
+                        var glided = GlideOn(above, left, true, true);
+                        if (glided != Vector3.zero)
+                        {
+                            left = WithoutRounding(left - glided, tiny);
+                            took = true;
+                        }
+                    }
+                    var owner = above.Draggable;
+                    if (left == Vector3.zero || !IsLive(owner) || owner.DragAxis == ScrollAxis.None) continue;
+                    // One that does not move the way the speed goes is passed over; one with PassOnMidDrag false that
+                    // does ends the walk (the switch changed since the glide set off), and the rest bounces.
+                    var offered = OwnerShare(above, owner.DragAxis, left);
+                    if (offered == Vector3.zero) continue;
+                    if (!owner.PassOnMidDrag) break;
+                    if (OwnerHeld(above, null)) continue;
+                    if (owner.OnRelease(offered))
+                    {
+                        left = WithoutRounding(left - offered, tiny);
+                        took = true;
+                    }
+                }
+
+                // Still at that end, and not sent anywhere since by what took part of it.
+                bool free = scroll.Phase == ScrollPhase.Idle || scroll.Phase == ScrollPhase.Gliding
+                    || (scroll.Phase == ScrollPhase.Springing && !scroll.Wheeling && scroll.Offset.Transition == null);
+                if (left == Vector3.zero || !Live(state) || !free) continue;
+                var rest = OffsetMoveOf(state, left);
+                var bounce = new Vector2(
+                    impact.x != 0f && scroll.AtEnd(0, impact.x) ? rest.x : 0f,
+                    impact.y != 0f && scroll.AtEnd(1, impact.y) ? rest.y : 0f);
+                if (bounce == Vector2.zero) continue;
+                scroll.Bounce(bounce);
+                Hold(scroll.Offset, null);
+            }
+            return took;
+        }
+
+        // A mouse wheel or trackpad over a node with a LayoutScroller. Only scroll containers take it (a wheel has no
+        // release to settle an owner's detent on, and macOS sheets do not resize to it), and a notch goes along its own
+        // axis: up the containers it reaches (Reach), innermost first, each takes the wheel step (positive y towards the
+        // start, as ScrollRect reads it) as far as its range allows, and what it leaves goes on up. A plain wheel (no x)
+        // with no vertical container to take it scrolls the horizontal ones instead, the nearest first. Containers a press
+        // holds are passed over, and what nothing takes goes on to the next scroll handler above that is not the system's.
+        // There is no latching a gesture to one container (Unity reports no trackpad phases), so a trackpad's momentum
+        // that reaches an inner container's end carries on into an outer one on the same axis. The Input System's UI
+        // module scales scrollDelta by its scrollDeltaPerTick (6 a notch by default) and the legacy one does not (1 a
+        // notch), so it is brought back to notches by the module's own ConvertPointerEventScrollDeltaToTicks: a notch is
+        // the same step whichever is in use.
+        internal static void OnWheel(LayoutNode node, PointerEventData eventData)
+        {
+            if (!TryPointer(node, out var origin)) return;
             var module = eventData.currentInputModule;
             var ticks = module != null ? module.ConvertPointerEventScrollDeltaToTicks(eventData.scrollDelta) : eventData.scrollDelta;
-            Vector2 delta;
-            switch (scroll.Axis)
-            {
-                case ScrollAxis.Vertical:
-                    delta = new Vector2(0f, -ticks.y);
-                    break;
-                case ScrollAxis.Horizontal:
-                    delta = new Vector2(-(ticks.x != 0f ? ticks.x : ticks.y), 0f);
-                    break;
-                default:
-                    delta = -ticks;
-                    break;
-            }
-            if (delta == Vector2.zero) return;
+            var left = -ticks * ScrollState.WheelStep;
+            if (left == Vector2.zero) return;
 
+            var foreign = Reach(origin, true);
+            bool vertical = false;
+            for (int i = 0; i < s_reach.Count; i++)
+            {
+                var scroll = WheelScroll(s_reach[i]);
+                if (scroll == null) continue;
+                vertical |= scroll.Scrolls(1);
+                left -= Wheel(scroll, left);
+            }
+            if (!vertical && ticks.x == 0f && left.y != 0f)
+            {
+                var across = new Vector2(left.y, 0f);
+                for (int i = 0; i < s_reach.Count; i++)
+                {
+                    var scroll = WheelScroll(s_reach[i]);
+                    if (scroll != null)
+                        across -= Wheel(scroll, across);
+                }
+                left.y = across.x;
+            }
+            FlushIfIdle();
+            if (left == Vector2.zero || foreign == null) return;
+
+            // What is left, in the event's own units (the module's conversion undone axis by axis), for as long as that
+            // handler reads it.
+            var delta = eventData.scrollDelta;
+            eventData.scrollDelta = new Vector2(
+                ticks.x != 0f ? -left.x / ScrollState.WheelStep * delta.x / ticks.x : 0f,
+                ticks.y != 0f ? -left.y / ScrollState.WheelStep * delta.y / ticks.y : 0f);
+            ExecuteEvents.ExecuteHierarchy(foreign, eventData, ExecuteEvents.scrollHandler);
+            eventData.scrollDelta = delta;
+        }
+
+        // A node's scroll state when the wheel can move it: scrolling, laid out, and not held by a press. Null otherwise.
+        private static ScrollState WheelScroll(NodeState state)
+        {
+            var scroll = state.Scroll;
+            return scroll != null && scroll.Axis != ScrollAxis.None && scroll.Measured && scroll.Phase != ScrollPhase.Dragging
+                ? scroll
+                : null;
+        }
+
+        // A scroll container takes as much of a wheel's `step` (its units, the way its offset moves) as its range allows
+        // on the axes it scrolls, added to its wheel's own target while it is still springing there (so notches add up
+        // rather than each starting from where it is drawn), and springs there quickly from where it is at the speed it
+        // has. Returns what it took.
+        private static Vector2 Wheel(ScrollState scroll, Vector2 step)
+        {
             var origin = scroll.Phase == ScrollPhase.Springing && scroll.Wheeling ? scroll.WheelTarget : scroll.Offset.Value;
-            var target = scroll.Clamp(origin + delta * ScrollState.WheelStep);
+            var taken = Vector2.zero;
+            for (int axis = 0; axis < 2; axis++)
+            {
+                float m = step[axis];
+                if (!scroll.Scrolls(axis) || m == 0f) continue;
+                float to = Mathf.Clamp(origin[axis] + m, 0f, scroll.Range[axis]) - origin[axis];
+                taken[axis] = m > 0f ? Mathf.Clamp(to, 0f, m) : Mathf.Clamp(to, m, 0f);
+            }
+            if (taken == Vector2.zero) return Vector2.zero;
+            var target = scroll.Clamp(origin + taken);
             SpringScroll(scroll, target, ScrollState.WheelOmega, 1f, 0f, null);
             if (scroll.Phase == ScrollPhase.Springing)
             {
                 scroll.Wheeling = true;
                 scroll.WheelTarget = target;
             }
-            FlushIfIdle();
+            return taken;
         }
 
-        // The node's scroll state, in play mode, when it is a scroll container.
-        private static bool TryScrolling(LayoutNode node, out NodeState state)
+        // Collects the nodes up the hierarchy from `origin` (it first) that a press, a drag or a wheel on it reaches, into
+        // s_reach, as far as the first object above it holding a handler for it (a drag handler, or for the wheel a
+        // scroll handler) that is not the system's, which it returns (null for none). UGUI gives what starts below such a
+        // handler to the innermost handler, so what is above it never hears it, and takes nothing from under it.
+        private static GameObject Reach(NodeState origin, bool wheel)
+        {
+            s_reach.Clear();
+            Transform start = origin.RectTransform;
+            for (var t = start; t != null; t = t.parent)
+            {
+                if (t != start && (wheel ? HoldsForeign<IScrollHandler>(t) : HoldsForeign<IDragHandler>(t)))
+                    return t.gameObject;
+                if (t.TryGetComponent(out LayoutNode node) && s_states.TryGetValue(node, out var state))
+                    s_reach.Add(state);
+            }
+            return null;
+        }
+
+        // Whether an object holds an enabled handler of T that is not a LayoutScroller (a DragGesture, a ScrollRect), as
+        // UGUI's ExecuteEvents would send one to.
+        private static bool HoldsForeign<T>(Transform transform) where T : IEventSystemHandler
+        {
+            transform.GetComponents(s_handlers);
+            bool holds = false;
+            for (int i = 0; i < s_handlers.Count && !holds; i++)
+            {
+                var handler = s_handlers[i];
+                holds = handler is T && !(handler is LayoutScroller) && (!(handler is Behaviour behaviour) || behaviour.isActiveAndEnabled);
+            }
+            s_handlers.Clear();
+            return holds;
+        }
+
+        // Whether a drag other than `except` has begun the owner on a node: one held by another press takes no part in a
+        // new drag, nor is it handed a glide.
+        private static bool OwnerHeld(NodeState state, Drag except)
+        {
+            for (int i = 0; i < s_drags.Count; i++)
+            {
+                var drag = s_drags[i];
+                if (drag == except) continue;
+                var parts = drag.Parts;
+                for (int j = 0; j < parts.Count; j++)
+                {
+                    if (parts[j].Owner != null && parts[j].Begun && parts[j].State == state)
+                        return true;
+                }
+            }
+            return false;
+        }
+
+        // Whether a drag owner takes part at all: there, and enabled (a component that is not a Behaviour always is).
+        private static bool IsLive(ILayoutDraggable owner) =>
+            owner is Behaviour behaviour ? behaviour != null && behaviour.isActiveAndEnabled : owner is Component component && component != null;
+
+        // Whether a node's state is still the one kept for it (it has not been disabled or destroyed since).
+        private static bool Live(NodeState state) =>
+            state.Node != null && s_states.TryGetValue(state.Node, out var current) && current == state;
+
+        // Whether a node is moving: its position, size or scale on its way somewhere.
+        private static bool IsMoving(NodeState state) => state.Position.Moving || state.Size.Moving || state.Scale.Moving;
+
+        // The state of the node a LayoutScroller is on, in play mode, for the pointer.
+        private static bool TryPointer(LayoutNode node, out NodeState state)
         {
             state = null;
-            return Application.isPlaying && node != null && s_states.TryGetValue(node, out state)
-                && state.Scroll != null && state.Scroll.Axis != ScrollAxis.None;
+            return Application.isPlaying && node != null && s_states.TryGetValue(node, out state);
         }
 
-        // A screen point in a node's local space (y up), through the camera the press was seen by (none for a Screen
-        // Space Overlay canvas). False when it misses the node's plane.
-        private static bool LocalPoint(NodeState state, Vector2 screen, Camera camera, out Vector2 local) =>
-            RectTransformUtility.ScreenPointToLocalPointInRectangle(state.RectTransform, screen, camera, out local);
+        // How far the pointer went from `from` to `to` (screen points) on a node's plane, in world units, through the
+        // camera the press was seen by (none for a Screen Space Overlay canvas, whose world units are screen pixels).
+        // False when either misses the plane.
+        private static bool WorldMove(RectTransform plane, Vector2 from, Vector2 to, Camera camera, out Vector3 world)
+        {
+            world = Vector3.zero;
+            if (!RectTransformUtility.ScreenPointToWorldPointInRectangle(plane, from, camera, out var start)
+                || !RectTransformUtility.ScreenPointToWorldPointInRectangle(plane, to, camera, out var end))
+                return false;
+            world = end - start;
+            return true;
+        }
+
+        // A world move (or velocity) as it moves a scroll container's offset, in the container's own units: dragging
+        // right scrolls it left and dragging up scrolls it down (its offset is y down), so x turns round and y does not.
+        private static Vector2 OffsetMoveOf(NodeState state, Vector3 world)
+        {
+            Vector2 local = state.RectTransform.InverseTransformVector(world);
+            return new Vector2(-local.x, local.y);
+        }
+
+        // The world move that moves a scroll container's offset by `move`: OffsetMoveOf undone.
+        private static Vector3 WorldOfOffsetMove(NodeState state, Vector2 move) =>
+            state.RectTransform.TransformVector(new Vector3(-move.x, move.y, 0f));
+
+        // A participant's share of a world move (or velocity) as its container's offset moves, on the drag's axes it moves
+        // along (of those, `x` and `y`).
+        private static Vector2 OffsetShare(Participant part, Vector3 world, bool x = true, bool y = true) =>
+            part.State.Scroll.OnAxes(Mask(OffsetMoveOf(part.State, world), part.X && x, part.Y && y));
+
+        // The part of a world vector along a drag owner's axis, taken in its node's parent's units and back, in world
+        // units; nothing for a root.
+        private static Vector3 OwnerShare(NodeState state, ScrollAxis axis, Vector3 world)
+        {
+            var space = state.RectTransform.parent;
+            if (space == null) return Vector3.zero;
+            var local = Mask(space.InverseTransformVector(world), Along(axis, 0), Along(axis, 1));
+            return local == Vector2.zero ? Vector3.zero : space.TransformVector(local);
+        }
+
+        private static Vector2 Mask(Vector2 vector, bool x, bool y) => new(x ? vector.x : 0f, y ? vector.y : 0f);
+
+        // Whether a drag owner's axis includes x (0) or y (1).
+        private static bool Along(ScrollAxis axis, int i) => i == 0
+            ? axis == ScrollAxis.Horizontal || axis == ScrollAxis.Both
+            : axis == ScrollAxis.Vertical || axis == ScrollAxis.Both;
+
+        // A vector with its components no bigger than `tiny` put to 0: what is left of a move a participant took all of
+        // along an axis, turned into its units and back, is rounding, and must not reach the next as a move of its own
+        // (an owner offered it would count as what moved last).
+        private static Vector3 WithoutRounding(Vector3 vector, float tiny) => new(
+            Mathf.Abs(vector.x) <= tiny ? 0f : vector.x,
+            Mathf.Abs(vector.y) <= tiny ? 0f : vector.y,
+            Mathf.Abs(vector.z) <= tiny ? 0f : vector.z);
+
+        // The drag or press of a pointer under way, or null.
+        private static Drag FindDrag(PointerEventData press)
+        {
+            for (int i = 0; i < s_drags.Count; i++)
+            {
+                if (s_drags[i].Press == press)
+                    return s_drags[i];
+            }
+            return null;
+        }
+
+        private static Drag StartDrag(PointerEventData press, LayoutScroller scroller, NodeState origin)
+        {
+            var drag = s_dragPool.Count > 0 ? s_dragPool.Pop() : new Drag();
+            drag.Press = press;
+            drag.Scroller = scroller;
+            drag.Origin = origin;
+            drag.SetOff = drag.X = drag.Y = drag.Fresh = drag.Sampled = false;
+            drag.Sole = drag.Last = null;
+            drag.Velocity = Vector3.zero;
+            drag.LastMoved = Time.unscaledTime;
+            s_drags.Add(drag);
+            return drag;
+        }
+
+        private static Participant NewPart(NodeState state, ILayoutDraggable owner, bool takesX, bool takesY)
+        {
+            var part = s_partPool.Count > 0 ? s_partPool.Pop() : new Participant();
+            part.State = state;
+            part.Owner = owner;
+            part.TakesX = takesX;
+            part.TakesY = takesY;
+            part.X = part.Y = part.Held = part.Dropped = part.Begun = part.Took = false;
+            return part;
+        }
+
+        private static void Recycle(Participant part)
+        {
+            part.State = null;
+            part.Owner = null;
+            s_partPool.Push(part);
+        }
+
+        private static void RecycleAll(List<Participant> parts)
+        {
+            for (int i = 0; i < parts.Count; i++)
+                Recycle(parts[i]);
+            parts.Clear();
+        }
+
+        private static void Recycle(Drag drag)
+        {
+            RecycleAll(drag.Parts);
+            drag.Press = null;
+            drag.Scroller = null;
+            drag.Origin = null;
+            drag.Sole = drag.Last = null;
+            s_dragPool.Push(drag);
+        }
 
         // ── Spaces ───────────────────────────────────────────────────────────────
 

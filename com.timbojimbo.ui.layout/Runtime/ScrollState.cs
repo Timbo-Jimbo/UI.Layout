@@ -10,13 +10,16 @@ namespace TimboJimbo.UI.Layout
         /// <summary>At rest, within range.</summary>
         Idle,
 
-        /// <summary>Held by a press: following its drag, or stopped where it was when the press caught it.</summary>
+        /// <summary>Held by a press: moved by its share of the press's drag, or stopped where it was when the press caught it.</summary>
         Dragging,
 
         /// <summary>Let go of with a velocity that dies away at UIScrollView's normal deceleration rate.</summary>
         Gliding,
 
-        /// <summary>On a spring: back to an end it ran past, to a wheel's target, or where ScrollTo or ScrollOffset sent it.</summary>
+        /// <summary>
+        /// On a spring: back to an end it ran past, to a wheel's target, where ScrollTo, ScrollIntoView or ScrollOffset
+        /// sent it, or on to its end as its content grew (ScrollAnchor End).
+        /// </summary>
         Springing,
     }
 
@@ -28,8 +31,11 @@ namespace TimboJimbo.UI.Layout
         /// <summary>An offset, set through ScrollOffset.</summary>
         Offset,
 
-        /// <summary>A descendant to bring into view, through ScrollTo.</summary>
+        /// <summary>A descendant to line up at an anchor, through ScrollTo.</summary>
         To,
+
+        /// <summary>A descendant to bring into view only as far as it needs, through ScrollIntoView.</summary>
+        IntoView,
     }
 
     /// <summary>
@@ -49,11 +55,7 @@ namespace TimboJimbo.UI.Layout
         // A glide stops once it is this slow on an axis, in units a second.
         public const float StopSpeed = 5f;
 
-        // iOS's rubber band: past an end by o, it is drawn past it by (1 - 1 / (o x 0.55 / d + 1)) x d, d its size that
-        // way, so the further it is dragged the less it gives, never as far as its own size.
-        public const float RubberBand = 0.55f;
-
-        // Held still this long before letting go, it was not flicked (as DragToThrow).
+        // Held still this long before letting go, a drag was not flicked (as DragToThrow).
         public const float StillFor = 0.08f;
 
         // How far a notch of a mouse wheel scrolls, in its units.
@@ -71,10 +73,10 @@ namespace TimboJimbo.UI.Layout
         // Which way it scrolls, as the last pass set it up: None when it does not (any more), its offset then 0.
         public ScrollAxis Axis;
 
-        // The clip and the input component on its object, which the system added (hidden and never saved) or found
-        // there. A RectMask2D of its own, not hidden, is left alone: it clips anyway.
+        // The clip on its object, which the system added (hidden and never saved) or found there. A RectMask2D of its
+        // own, not hidden, is left alone: it clips anyway. (The LayoutScroller that takes the pointer for it is kept on
+        // its NodeState, as a drag owner's node has one too.)
         public RectMask2D Clip;
-        public LayoutScroller Scroller;
 
         public ScrollPhase Phase;
 
@@ -88,6 +90,16 @@ namespace TimboJimbo.UI.Layout
         public bool GlideX;
         public bool GlideY;
 
+        // Whether a glide that runs into an end on each axis stops there for something above it on that axis to take its
+        // speed on, noted as it is let go of or handed a glide (something above it could). Step then stops it at that end
+        // and records the speed it ran into it with (Impact, its units a second, the way its offset was going, and
+        // Impacted) rather than bouncing, for the system to hand on once the frame is laid out, bouncing it there after
+        // all if nothing takes it.
+        public bool PassX;
+        public bool PassY;
+        public bool Impacted;
+        public Vector2 Impact;
+
         // Its size and how far it can scroll each way (how far its content runs past it; 0 on axes it does not
         // scroll), from the last pass that laid it out, and whether one has.
         public Vector2 Viewport;
@@ -98,20 +110,16 @@ namespace TimboJimbo.UI.Layout
         public bool Wheeling;
         public Vector2 WheelTarget;
 
-        // The press holding it while it is Dragging, and whether it is following that press's drag: from its cursor
-        // then (in its local units, y up) and its raw offset then (before the rubber band), and how fast the drawn
-        // offset was moving the last time the pointer moved, smoothed over the last few moves.
+        // The press holding it while it is Dragging, and its raw offset meanwhile: where the shares of that press's drag
+        // have taken it before the rubber band (its units, as Offset), drawn banded past the ends. Taken from where it is
+        // drawn as the press takes hold of it, the rubber band undone, so a drag that catches it past an end carries on
+        // from there without a jump.
         public PointerEventData Press;
-        public bool Dragged;
-        public Vector2 DragCursor;
-        public Vector2 DragFrom;
-        public Vector2 DragLast;
-        public float LastMoved;
-        public bool Sampled;
-        public Vector2 DragVelocity;
+        public Vector2 Raw;
 
-        // A request not resolved yet (the latest wins): what it asks for, and the change it was made in (null for none),
-        // which it springs for when that change's pass resolves it.
+        // A request not resolved yet (the latest wins): what it asks for (an offset, or a descendant, with ScrollTo's
+        // anchor), and the change it was made in (null for none), which it springs for when that change's pass resolves
+        // it.
         public ScrollRequest Request;
         public Vector2 RequestOffset;
         public LayoutNode RequestTarget;
@@ -135,7 +143,10 @@ namespace TimboJimbo.UI.Layout
             Scrolls(0) ? Mathf.Clamp(offset.x, 0f, Range.x) : 0f,
             Scrolls(1) ? Mathf.Clamp(offset.y, 0f, Range.y) : 0f);
 
-        /// <summary>Where a raw drag offset is drawn: as it is within range, rubber-banded past either end.</summary>
+        /// <summary>
+        /// Where a raw drag offset is drawn: as it is within range, and past either end rubber-banded as iOS does
+        /// (<see cref="LayoutSystem.RubberBand"/>), its size that way the most it ever gives.
+        /// </summary>
         public Vector2 Band(Vector2 raw) => new(
             Scrolls(0) ? Band(raw.x, Range.x, Viewport.x) : 0f,
             Scrolls(1) ? Band(raw.y, Range.y, Viewport.y) : 0f);
@@ -146,54 +157,153 @@ namespace TimboJimbo.UI.Layout
             Scrolls(1) ? Unband(drawn.y, Range.y, Viewport.y) : 0f);
 
         /// <summary>
-        /// Takes hold of it for a drag from <paramref name="cursor"/> (its local point, y up) at <paramref name="now"/>
-        /// (unscaled seconds). The raw offset it starts from is where it is drawn with the rubber band undone, so a drag
-        /// that catches it past an end carries on from there without a jump.
+        /// Whether it is at its end on <paramref name="axis"/> (0 is x, 1 is y) the way <paramref name="way"/> goes (by
+        /// its sign, as its offset would): at its start going back, at its range going on, within its rest distance. Going
+        /// nowhere, it is at its end that way.
         /// </summary>
-        public void BeginDrag(Vector2 cursor, float now)
+        public bool AtEnd(int axis, float way) =>
+            way > 0f ? Offset.Value[axis] >= Range[axis] - Rest : way == 0f || Offset.Value[axis] <= Rest;
+
+        /// <summary>
+        /// Whether it stays at its end on <paramref name="axis"/> (0 is x, 1 is y) as its range grows, for a ScrollAnchor
+        /// of End: not laid out yet (it starts there), at rest within its rest distance of its range, or springing to
+        /// there. Not while a press holds it or a glide carries it: a flick sticks once it comes to rest at the end.
+        /// </summary>
+        public bool StaysAtEnd(int axis) => !Measured || Phase switch
         {
-            Dragged = true;
-            DragCursor = cursor;
-            DragFrom = Unband(Offset.Value);
-            DragLast = Offset.Value;
-            LastMoved = now;
-            Sampled = false;
-            DragVelocity = Vector2.zero;
+            ScrollPhase.Idle => AtEnd(axis, 1f),
+            ScrollPhase.Springing => Offset.Target[axis] >= Range[axis] - Rest,
+            _ => false,
+        };
+
+        /// <summary>
+        /// Held, takes as much of <paramref name="move"/> (its units, the way its offset moves) as brings a raw offset
+        /// stretched past an end back to that end, and no further. Returns what it took.
+        /// </summary>
+        public Vector2 Relax(Vector2 move)
+        {
+            var taken = Vector2.zero;
+            for (int axis = 0; axis < 2; axis++)
+            {
+                if (!Scrolls(axis)) continue;
+                float raw = Raw[axis], m = move[axis];
+                if (raw < 0f && m > 0f)
+                    taken[axis] = Mathf.Min(m, -raw);
+                else if (raw > Range[axis] && m < 0f)
+                    taken[axis] = Mathf.Max(m, Range[axis] - raw);
+            }
+            MoveRaw(taken);
+            return taken;
         }
 
         /// <summary>
-        /// Follows the drag to <paramref name="cursor"/> at <paramref name="now"/>: the raw offset moves with the
-        /// pointer exactly (dragging up scrolls down, dragging left scrolls right), and is drawn rubber-banded past the
-        /// ends. Its velocity is the drawn offset's, over the time since the pointer last moved (which can be several
-        /// frames, when the pointer reports less often than the game draws), smoothed over the last few moves.
+        /// Held, takes as much of <paramref name="move"/> as keeps its raw offset within range: from past an end back
+        /// towards range it goes as far as the other end, and it never goes further past the end it is past. Returns what
+        /// it took.
         /// </summary>
-        public void Drag(Vector2 cursor, float now)
+        public Vector2 Take(Vector2 move)
         {
-            var moved = cursor - DragCursor;
-            var drawn = Band(DragFrom + new Vector2(-moved.x, moved.y));
-            float dt = now - LastMoved;
-            if (dt > 1e-4f)
+            var taken = Vector2.zero;
+            for (int axis = 0; axis < 2; axis++)
             {
-                var sample = (drawn - DragLast) / dt;
-                DragVelocity = Sampled ? Vector2.Lerp(DragVelocity, sample, 0.5f) : sample;
-                Sampled = true;
+                if (!Scrolls(axis)) continue;
+                float raw = Raw[axis], m = move[axis];
+                float to = m > 0f ? Mathf.Min(raw + m, Mathf.Max(raw, Range[axis])) : Mathf.Max(raw + m, Mathf.Min(raw, 0f));
+                taken[axis] = to - raw;
             }
-            DragLast = drawn;
-            LastMoved = now;
-            Offset.Value = drawn;
-            Offset.Velocity = DragVelocity;
+            MoveRaw(taken);
+            return taken;
         }
 
-        /// <summary>How fast it was going as its press let go at <paramref name="now"/>: nothing if it was not dragged, or held still first.</summary>
-        public Vector2 ReleaseVelocity(float now) => Dragged && now - LastMoved <= StillFor ? OnAxes(DragVelocity) : Vector2.zero;
+        /// <summary>
+        /// Held, takes all of <paramref name="move"/> on the axes it scrolls, past an end as far as it goes (drawn
+        /// rubber-banded). Returns what it took.
+        /// </summary>
+        public Vector2 Stretch(Vector2 move)
+        {
+            var taken = OnAxes(move);
+            MoveRaw(taken);
+            return taken;
+        }
+
+        /// <summary>
+        /// How far it is drawn moving for each unit its raw offset moves, on each axis it scrolls: 1 within range, and past
+        /// an end the rubber band's slope there, so a velocity of its raw offset times this is its drawn offset's.
+        /// </summary>
+        public Vector2 Slope() => new(
+            Scrolls(0) ? Slope(Raw.x, Range.x, Viewport.x) : 0f,
+            Scrolls(1) ? Slope(Raw.y, Range.y, Viewport.y) : 0f);
+
+        /// <summary>
+        /// Sets it gliding at <paramref name="velocity"/> (its units a second) on the axes where that is not 0, from where
+        /// it is drawn, to a stop as a flick's glide goes; its other axes carry on as they were (at rest, or gliding). It
+        /// is Gliding after, and the caller sets its offset moving.
+        /// </summary>
+        public void Glide(Vector2 velocity)
+        {
+            if (Phase != ScrollPhase.Gliding)
+                SetOffFromRest();
+            for (int axis = 0; axis < 2; axis++)
+            {
+                if (velocity[axis] == 0f) continue;
+                Offset.Velocity[axis] = velocity[axis];
+                Offset.Target[axis] = Offset.Value[axis];
+                SetGliding(axis, true);
+            }
+            Phase = ScrollPhase.Gliding;
+        }
+
+        /// <summary>
+        /// Sends it on past the end it is at, at <paramref name="velocity"/> (its units a second) on the axes where that is
+        /// not 0, springing back to that end, as a glide that runs into an end with nothing to hand its speed to does; its
+        /// other axes carry on as they were. At rest, it is Springing after, and the caller sets its offset moving.
+        /// </summary>
+        public void Bounce(Vector2 velocity)
+        {
+            if (Phase == ScrollPhase.Idle)
+            {
+                SetOffFromRest();
+                Phase = ScrollPhase.Springing;
+            }
+            var end = Clamp(Offset.Value);
+            for (int axis = 0; axis < 2; axis++)
+            {
+                if (velocity[axis] == 0f) continue;
+                Offset.Velocity[axis] = velocity[axis];
+                Offset.Target[axis] = end[axis];
+                SetGliding(axis, false);
+            }
+        }
+
+        // Where it is drawn becomes where it goes, still, on the spring it bounces back from an end on: what Glide and
+        // Bounce set off from at rest.
+        private void SetOffFromRest()
+        {
+            GlideX = GlideY = false;
+            Wheeling = false;
+            Offset.Target = Offset.Value;
+            Offset.Velocity = Vector2.zero;
+            Offset.Omega = BounceOmega;
+            Offset.Zeta = 1f;
+            Offset.Delay = 0f;
+        }
+
+        // The raw offset moves by what a share took, and it is drawn there, rubber-banded past the ends.
+        private void MoveRaw(Vector2 taken)
+        {
+            if (taken == Vector2.zero) return;
+            Raw += taken;
+            Offset.Value = Band(Raw);
+        }
 
         /// <summary>
         /// Moves it <paramref name="dt"/> seconds on while it glides or springs. True once it has come to rest (the
         /// caller puts it at its target, Idle). Springing, it goes on its spring (after any delay). Gliding, each axis
         /// still gliding advances by exactly v0 (1 - e^(-k dt)) / k as its speed dies away as e^(-k dt); one that runs
         /// past an end springs back to it from then on, keeping its velocity (running on into the overshoot, as iOS
-        /// bounces), and one slower than the stop speed stops where it is; the rest spring to their ends. Once no axis
-        /// is gliding it is Springing.
+        /// bounces), unless something above it could take its speed on that axis (PassX, PassY): then it stops at the
+        /// end, and the speed it ran into it with is recorded (Impact) for the system to hand on. One slower than the stop
+        /// speed stops where it is; the rest spring to their ends. Once no axis is gliding it is Springing.
         /// </summary>
         public bool Step(float dt)
         {
@@ -218,7 +328,18 @@ namespace TimboJimbo.UI.Layout
                     {
                         target[axis] = end;
                         SetGliding(axis, false);
-                        settled = false;
+                        if (axis == 0 ? PassX : PassY)
+                        {
+                            // Stopped at the end, the rest of this step's motion lost, for its speed to go on up.
+                            value[axis] = end;
+                            Impact[axis] = velocity[axis];
+                            velocity[axis] = 0f;
+                            Impacted = true;
+                        }
+                        else
+                        {
+                            settled = false;
+                        }
                     }
                     else if (Mathf.Abs(velocity[axis]) < StopSpeed)
                     {
@@ -255,28 +376,32 @@ namespace TimboJimbo.UI.Layout
             else GlideY = gliding;
         }
 
-        // One axis of Band: past an end by `over`, drawn past it by (1 - 1 / (over x 0.55 / size + 1)) x size. With no
-        // size it does not give at all.
+        // One axis of Band: past an end, drawn past it by the rubber band with its size as the limit. With no size it does
+        // not give at all.
         private static float Band(float raw, float range, float size)
         {
             if (raw >= 0f && raw <= range) return raw;
             float end = raw < 0f ? 0f : range;
-            if (size <= 0f) return end;
-            float over = Mathf.Abs(raw - end);
-            float drawn = (1f - 1f / (over * RubberBand / size + 1f)) * size;
-            return end + Mathf.Sign(raw - end) * drawn;
+            return end + LayoutSystem.RubberBand(raw - end, size);
         }
 
-        // One axis of Unband, Band solved for how far past the end it was dragged: size / 0.55 x b / (size - b) for b
-        // drawn past it. A spring can carry it further past an end than a drag could draw it (which never reaches its
-        // size), so b is kept just short of that.
+        // One axis of Slope: past an end by `over`, Band's slope there, 0.55 / (over x 0.55 / size + 1)^2, which dies away
+        // as the band stretches. With no size it does not give at all.
+        private static float Slope(float raw, float range, float size)
+        {
+            if (raw >= 0f && raw <= range) return 1f;
+            if (size <= 0f) return 0f;
+            float over = raw < 0f ? -raw : raw - range;
+            float stretch = over * LayoutSystem.RubberBandCoefficient / size + 1f;
+            return LayoutSystem.RubberBandCoefficient / (stretch * stretch);
+        }
+
+        // One axis of Unband: Band undone, the pull past the end that draws it where it is (RubberBandInverse).
         private static float Unband(float drawn, float range, float size)
         {
             if (drawn >= 0f && drawn <= range) return drawn;
             float end = drawn < 0f ? 0f : range;
-            if (size <= 0f) return end;
-            float over = Mathf.Min(Mathf.Abs(drawn - end), size * 0.99f);
-            return end + Mathf.Sign(drawn - end) * (size / RubberBand * over / (size - over));
+            return end + LayoutSystem.RubberBandInverse(drawn - end, size);
         }
     }
 }

@@ -28,13 +28,15 @@ namespace TimboJimbo.UI.Layout
 
         private static readonly System.Comparison<Boarding> s_byDrawnBefore = CompareDrawnBefore;
 
-        // One entry waiting to board: a node moved to another layout parent in the change, or a pair (names), its
-        // source with its destination directly above it. It is ranked by where it drew before the change (a pair by
-        // its source): the canvas sorting that drew it there, then the parent it was in and its sibling index there.
+        // One entry waiting to board: a node moved to another layout parent in the change, a node growing out of or
+        // shrinking into one that stays shown under its name (Anchored), or a pair (names), its source with its
+        // destination directly above it. It is ranked by where it drew before the change (a pair by its source): the
+        // canvas sorting that drew it there, then the parent it was in and its sibling index there.
         private struct Boarding
         {
             public NodeState Node;
             public NodeState Over;
+            public bool Anchored;
             public int Layer;
             public int Order;
             public Transform From;
@@ -73,11 +75,24 @@ namespace TimboJimbo.UI.Layout
             s_boarding.Add(new Boarding { Node = source, Over = destination });
         }
 
+        // For names: a node growing out of, or shrinking back into, one that stays shown boards by itself, in place of
+        // boarding for a move to another parent in the same change, and flies until its effect has played.
+        private static void BoardAnchored(NodeState state)
+        {
+            for (int i = s_boarding.Count - 1; i >= 0; i--)
+            {
+                if (s_boarding[i].Over == null && s_boarding[i].Node == state)
+                    s_boarding.RemoveAt(i);
+            }
+            s_boarding.Add(new Boarding { Node = state, Anchored = true });
+        }
+
         // At the end of Animate, once its pass is over: the change's new flights take off together, ranked by where each
         // drew before the change, above everything flying already, which keeps its place (a node moved again while it
         // flies stays where it is in the layer). A node the change moved to another parent that is not moving (its new
-        // place is where it was drawn), or that is not shown, does not board: it would only leave again at once. Then
-        // what is inside another flight is brought above it, and the layer is numbered.
+        // place is where it was drawn), or that is not shown, does not board: it would only leave again at once. One
+        // anchored always does: its effect moves it. Then what is inside another flight is brought above it, and the
+        // layer is numbered.
         private static void Embark()
         {
             if (s_boarding.Count == 0) return;
@@ -100,7 +115,7 @@ namespace TimboJimbo.UI.Layout
                 node.FlewFrom = null;
                 if (boarding.Over == null)
                 {
-                    if (node.PassShown && (node.Position.Moving || node.Size.Moving))
+                    if (boarding.Anchored || (node.PassShown && (node.Position.Moving || node.Size.Moving)))
                         TakeOff(node);
                 }
                 else
@@ -247,10 +262,11 @@ namespace TimboJimbo.UI.Layout
         }
 
         // Whether a flight has landed: its position and size are at rest, caught, skipped or where they were going, so
-        // it is drawn where it stays. A pair half lands with its pair, once both halves and the fades of its
-        // destination's ancestors are (LayoutSystem.Match.cs).
+        // it is drawn where it stays, and an anchored one's effect has played out (AnchorPlayed). A pair half lands
+        // with its pair, once both halves and the fades of its destination's ancestors are (LayoutSystem.Match.cs).
         private static bool HasLanded(NodeState state)
         {
+            if (state.Anchor != null && !AnchorPlayed(state)) return false;
             if (state.Flight.PairHalf) return PairAtRest(state);
             return !state.Position.Moving && !state.Size.Moving;
         }
@@ -260,8 +276,9 @@ namespace TimboJimbo.UI.Layout
         // reach it again: UGUI's raycasts stop looking up for them at its canvas, and a pair half ignores them. A
         // follower stays while it is hidden: it is drawn at the node it follows, and lands with it. Shown again, and not
         // made a destination by the change that showed it (`transition`, whose pairs have formed by now), it stops
-        // following and leaves (ShowAgain). A destination that drops out ends its pair first, and what followed it drops
-        // out in turn if it is not shown either, so the layer is looked through again.
+        // following and leaves (ShowAgain). One shrinking back into its anchor stays too, until its effect has played. A
+        // destination that drops out ends its pair first, and what followed it drops out in turn if it is not shown
+        // either, so the layer is looked through again.
         private static void DropOut(LayoutTransition transition)
         {
             for (int i = s_flights.Count - 1; i >= 0; i--)
@@ -273,7 +290,7 @@ namespace TimboJimbo.UI.Layout
                         ShowAgain(state, transition);
                     continue;
                 }
-                if (state.PassShown) continue;
+                if (state.PassShown || (state.Anchor != null && state.Leaving)) continue;
                 bool ended = state.Flight.PairHalf && Unfollow(state, true);
                 Land(state);
                 if (ended)

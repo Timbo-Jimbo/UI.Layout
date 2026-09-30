@@ -110,6 +110,22 @@ namespace TimboJimbo.UI.Layout
         Both,
     }
 
+    /// <summary>
+    /// Which end a scroll container keeps to as what it scrolls grows, as SwiftUI's defaultScrollAnchor does for where
+    /// a scroll view starts and how it takes a change of size.
+    /// </summary>
+    public enum ScrollAnchor
+    {
+        /// <summary>It starts at its start, and its offset stays as it is as its content grows.</summary>
+        Start,
+
+        /// <summary>
+        /// It starts at its end, and while it is there it stays there as its content grows, as a chat or a log does;
+        /// scrolled away from its end, it stays where it is.
+        /// </summary>
+        End,
+    }
+
     /// <summary>One of nine points on a rect: a corner, the middle of an edge, or its centre.</summary>
     public enum AttachPoint
     {

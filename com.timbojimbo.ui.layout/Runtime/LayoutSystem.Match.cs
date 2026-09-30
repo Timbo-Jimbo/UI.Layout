@@ -9,15 +9,24 @@ namespace TimboJimbo.UI.Layout
         // ── Names ────────────────────────────────────────────────────────────────
         //
         // A node holds its MatchName, under its effective id (its own MatchId, or else the nearest one above it), while
-        // it is shown. Inside Animate, a node the change starts showing takes over from the one other node that held its
-        // name and id before the change, and one the change stops showing is taken over by the one other node that holds
-        // them after it. That is a pair: the source, and the destination that takes over from it. The destination is
-        // given the source's presentation, where it is drawn and how fast it is drawn moving there, and then moves to its
-        // own place on its own springs for the change, as any node does, fading in. The source follows it, drawn at its
-        // rect beneath it and fading out from halfway, until the pair lands (or it is shown again with no new pair, when
-        // it stops following and comes back as itself). Both fly (LayoutSystem.Flight.cs), ignoring their parent groups,
-        // so neither a clip nor a page's fade cuts them on the way. What is inside the destination rides it, laid out at
-        // its own size and pinned at its top left; what is inside the source rides that.
+        // it is shown. Inside Animate, a node the change starts showing pairs with the one other node that held its name
+        // and id before the change, and one the change stops showing with the one other node that holds them after it.
+        //
+        // When the other changes too, one shown and one hidden, it is a hand-off: the source, and the destination that
+        // takes over from it. The destination is given the source's presentation, where it is drawn and how fast it is
+        // drawn moving there, and then moves to its own place on its own springs for the change, as any node does,
+        // fading in. The source follows it, drawn at its rect beneath it and fading out from halfway, until the pair
+        // lands (or it is shown again with no new pair, when it stops following and comes back as itself). Both fly
+        // (LayoutSystem.Flight.cs), ignoring their parent groups, so neither a clip nor a page's fade cuts them on the
+        // way. What is inside the destination rides it, laid out at its own size and pinned at its top left; what is
+        // inside the source rides that.
+        //
+        // When the other stays shown, nothing is handed over and the other does not move: the one that changes plays its
+        // own DisplayEffect with the other's rect as its away pose (its Anchor), in place of the effect's edge and
+        // shrink, growing out of it as it is shown and shrinking back into it as it is hidden (a dropdown's list out of
+        // its button), fading if its effect fades, and flying until the effect has played. What is inside it is laid out
+        // at its own size, pinned at its top left. For a hand-off instead (a cell zooming into the page it opens), the
+        // other is hidden in the same change.
 
         // Whether the pass under way is Animate's pass for its change, which notes who holds each name before and after.
         private static bool s_matching;
@@ -176,7 +185,7 @@ namespace TimboJimbo.UI.Layout
                 {
                     var state = s_changing[i];
                     if (!s_paired.Contains(state))
-                        FindPartner(state);
+                        FindPartner(state, transition);
                 }
                 for (int i = 0; i < s_pairs.Count; i++)
                     TakeOver(s_pairs[i], transition);
@@ -189,15 +198,17 @@ namespace TimboJimbo.UI.Layout
             }
         }
 
-        // A node the change started showing takes over from the one other node that held its name and id before the
-        // change, which it hid or which stays shown (lent, as iOS's zoom lends the cell it opens from); one the change
-        // stopped showing is taken over by the one other node that holds them after it (back into a row that stayed
-        // shown). Neither may be a root (the system does not drive a root's rect), both are on one root canvas (flights
-        // are ranked within its sorting), neither is inside the other (drawn at the other's rect, it would move itself),
-        // and both are in view: the source as it is drawn, the destination where it goes, so a ScrollTo in the same change
-        // brings it into view. With several candidates, or none because the id is set on one side only, it pairs with
-        // none and each plays its own effect; the mistake is said once for the name.
-        private static void FindPartner(NodeState state)
+        // A node the change started showing pairs with the one other node that held its name and id before the change,
+        // and one the change stopped showing with the one other node that holds them after it. Neither may be a root
+        // (the system does not drive a root's rect), both are on one root canvas (flights are ranked within its
+        // sorting), neither is inside the other (drawn at the other's rect, it would move itself), and both are in view:
+        // the one drawn before the change as it is drawn, the one drawn after it where it goes, so a ScrollTo in the same
+        // change brings it into view. With several candidates, or none because the id is set on one side only, it pairs
+        // with none and each plays its own effect; the mistake is said once for the name. The other changing too, it is a
+        // hand-off (TakeOver). The other staying shown, it is this one's anchor (AnchorTo), if this one plays its own
+        // effect in the change (its shown value set off by it) rather than riding what above it comes or goes, which
+        // plays nothing of its own to grow or shrink by.
+        private static void FindPartner(NodeState state, LayoutTransition transition)
         {
             bool shown = state.PassShown;
             string name = shown ? state.PassName : state.WasName;
@@ -247,12 +258,17 @@ namespace TimboJimbo.UI.Layout
                 return;
             }
 
+            s_paired.Add(state);
+            s_paired.Add(partner);
+            if (partner.WasShown && partner.PassShown)
+            {
+                if (state.Shown.Moving && state.Shown.Transition == transition)
+                    AnchorTo(state, partner, transition);
+                return;
+            }
+
             var source = shown ? partner : state;
             var destination = shown ? state : partner;
-            s_paired.Add(source);
-            s_paired.Add(destination);
-            // Following that one already (a lent source hidden while it flies): the pair goes on as it is.
-            if (source.Follows == destination) return;
 
             // Where it is drawn as the passes before the change's update left it, as the in-view test read it: what they
             // put somewhere at once (an Offset a drag moved in the same frame, taken up by the fling letting go of it, or
@@ -299,7 +315,7 @@ namespace TimboJimbo.UI.Layout
 
         // Whether any of a node is in view of the scroll containers it is inside (a clip of the user's is not asked): as
         // it is drawn now (its presentation, slide and all, and each scroll as drawn), or not `drawn`, where it goes (its
-        // targets, and each scroll where it is springing to). Up its layout parents, as TryScrollTarget goes, its rect is
+        // targets, and each scroll where it is springing to). Up its layout parents, as TryScrollRect goes, its rect is
         // taken into each one's content space; each scroll container must overlap it with what it shows, its whole rect
         // at its scroll, which then comes off on the way up. Flying, or inside a flight, it is drawn above every clip.
         private static bool InView(NodeState state, bool drawn)
@@ -361,8 +377,11 @@ namespace TimboJimbo.UI.Layout
             if (Degenerate(space)) return;
 
             // Turning back: it follows the source, which took over from it, so it is drawn at the source's rect
-            // already, part faded. Asked before Link, which stops it following.
+            // already, part faded. Asked before Link, which stops it following. Either half growing out of or shrinking
+            // into an anchor is taken over from where it is drawn now, and stops.
             bool reversal = destination.Follows == source;
+            source.Anchor = null;
+            destination.Anchor = null;
             Link(source, destination);
 
             // Position: where the source is drawn, in the parent's layout space with the parent's scroll put back on
@@ -402,6 +421,23 @@ namespace TimboJimbo.UI.Layout
             if (!reversal && destination.Flight != null)
                 Land(destination);
             BoardPair(source, destination);
+        }
+
+        // A node shown or hidden with one that stays shown under its name plays its effect with that one as its away
+        // pose (Anchor, read again each time it is drawn): it grows out of it, or shrinks back into it, flying until its
+        // effect has played. Turned back part way (shown again as it shrank into it, or hidden as it grew out of it),
+        // it goes back from where it is drawn, as its effect turns back. Still following what took over from it in a
+        // hand-off, it stops, and fades back in on the change from where its fade has got to.
+        private static void AnchorTo(NodeState state, NodeState anchor, LayoutTransition transition)
+        {
+            if (state.Follows != null)
+            {
+                state.Follows = null;
+                Retarget(state, state.Opacity, new Vector2(OpacityTargetOf(state), 0f), transition);
+            }
+            state.Anchor = anchor;
+            ReadAnchor(state);
+            BoardAnchored(state);
         }
 
         // Makes the source follow the destination. What followed the source follows the destination instead, so that a
@@ -576,9 +612,10 @@ namespace TimboJimbo.UI.Layout
         }
 
         // Catching a node first ends every pair whose destination is the node or is inside it, each cross-fade finished
-        // at once: the destination at its opacity, its sources gone (one lent is back in its place). Those flights land,
-        // and the node is then caught as any node is. Held part-faded, a destination would stay so over its source, which
-        // is outside what is caught and would fade out from under it (StopInside holds a nested one too).
+        // at once: the destination at its opacity, its sources gone. Those flights land, and the node is then caught as
+        // any node is. Held part-faded, a destination would stay so over its source, which is outside what is caught and
+        // would fade out from under it (StopInside holds a nested one too). A node growing out of its anchor is caught
+        // as any node is, its shown value held, so it stays where it is drawn between the two.
         private static void EndPairsInside(NodeState state)
         {
             var caught = state.RectTransform;
@@ -625,8 +662,8 @@ namespace TimboJimbo.UI.Layout
             s_followers.Clear();
         }
 
-        // A node stops following the one that took over from it. Still shown (lent), it is back in its place at once,
-        // its opacity at its own (its other springs never moved). Ended early while it is on its way out, it stays where
+        // A node stops following the one that took over from it. Still shown, it is back in its place at once, its
+        // opacity at its own (its other springs never moved). Ended early while it is on its way out, it stays where
         // it is drawn and finishes its fade there: its position and size are put there (its size over its scale, which
         // it is drawn at again), Place leaves both and tells its content nothing (Thrown), so that stays laid out at
         // its own size as it was drawn while following, and it is drawn without its effect's slide and scale

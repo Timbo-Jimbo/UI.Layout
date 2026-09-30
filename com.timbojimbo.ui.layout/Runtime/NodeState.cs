@@ -78,6 +78,14 @@ namespace TimboJimbo.UI.Layout
         // follows another itself.
         public NodeState Follows;
 
+        // The node it grows out of or shrinks back into while its DisplayEffect plays (null otherwise): one that held its
+        // name and stayed shown as it was shown or hidden inside Animate (LayoutSystem.Match.cs). That node's rect is its
+        // away pose, in place of its effect's edge and shrink. AnchorCentre and AnchorSize are where that node was last
+        // drawn, in Parent's layout space, read as this one is written (once every tree has been, as a follower is).
+        public NodeState Anchor;
+        public Vector2 AnchorCentre;
+        public Vector2 AnchorSize;
+
         // Whether the system drives its RectTransform (every node but a root), and the tracker that tells the editor
         // so: it shows those values as driven, and does not save them into the scene.
         public bool Owned;
@@ -111,6 +119,15 @@ namespace TimboJimbo.UI.Layout
         // Its scroll offset and what moves it, once it has scrolled (its Scroll not None), kept if it stops: its
         // LayoutNode children are drawn moved by that offset. Null for a node that never has.
         public ScrollState Scroll;
+
+        // Its drag owner (an ILayoutDraggable on its object) as the last pass found it, looked up each pass as its content
+        // is, so one added or removed is met with the next frame; null for none. It takes part in drags only while it is
+        // enabled.
+        public ILayoutDraggable Draggable;
+
+        // The input component on its object that takes the pointer for it while it scrolls or has an enabled drag owner,
+        // which the system added (hidden and never saved) or found there; kept, turned off, while it has neither.
+        public LayoutScroller Scroller;
 
         // ── This pass ────────────────────────────────────────────────────────────
 

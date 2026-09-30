@@ -66,7 +66,7 @@ namespace TimboJimbo.UI.Layout
         [Tooltip("How it appears and disappears when its Display changes inside LayoutSystem.Animate, on its Animation, the same both ways. Only the topmost node that changes plays it; what is inside rides along.")]
         [SerializeField] private DisplayEffect _displayEffect = DisplayEffect.Default;
 
-        [Tooltip("Its name for matching: inside LayoutSystem.Animate, a node shown with the same name (and id) as one hidden takes over from where that one is drawn. Empty: not matched.")]
+        [Tooltip("Its name for matching: inside LayoutSystem.Animate, a node shown with the same name (and id) as one hidden takes over from where that one is drawn; shown or hidden with one that stays shown, it grows out of that one or shrinks back into it. Empty: not matched.")]
         [SerializeField] private string _matchName;
 
         // Code only, and never saved: an id is usually an object of the game's (an author, an item).
@@ -74,6 +74,9 @@ namespace TimboJimbo.UI.Layout
 
         [Tooltip("Which way it scrolls its children: it clips them, lets them run past its edge that way, and can be dragged, flicked and wheeled, as a UIScrollView.")]
         [SerializeField] private ScrollAxis _scroll;
+
+        [Tooltip("Which end it keeps to as what it scrolls grows. End: it starts at its end and, while it is there, stays there as its content grows, as a chat does.")]
+        [SerializeField] private ScrollAnchor _scrollAnchor;
 
         /// <summary>How wide it is.</summary>
         public Sizing Width { get => _width; set { _width = value; Changed(); } }
@@ -143,15 +146,18 @@ namespace TimboJimbo.UI.Layout
         /// shrinking, and sliding just past an edge of its parent's rect as drawn (the screen, for one floating against
         /// its root). A slide hides it only where something clips at that edge: a node between it and the clip (a
         /// padded wrapper) keeps it in view. Only the topmost node that changes plays it; what is inside rides along. A
-        /// root only fades.
+        /// root only fades. Shown or hidden with a node that stays shown under its <see cref="MatchName"/>, it grows out
+        /// of that node's rect and shrinks back into it instead of sliding and shrinking, fading if it fades.
         /// </summary>
         public DisplayEffect DisplayEffect { get => _displayEffect; set { _displayEffect = value; Changed(); } }
 
         /// <summary>
         /// Its name for matching. Inside <see cref="LayoutSystem.Animate"/>, when a node with this name and matching id
-        /// (<see cref="MatchId"/>) starts being shown and another that had them is hidden (or stays shown), the shown
-        /// one takes over from where the other is drawn, flying above everything until it lands. Empty: not matched.
-        /// Nodes on another root canvas never match; roots never match.
+        /// (<see cref="MatchId"/>) starts being shown and another that had them is hidden, the shown one takes over from
+        /// where the other is drawn, flying above everything until it lands (a cell zooming into the page it opens).
+        /// When the other stays shown, it does not move: the one shown or hidden grows out of it or shrinks back into it,
+        /// the other's rect standing in for its <see cref="DisplayEffect"/>'s edge and shrink (a dropdown's list out of
+        /// its button). Empty: not matched. Nodes on another root canvas never match; roots never match.
         /// </summary>
         public string MatchName { get => _matchName ?? string.Empty; set { _matchName = value; Changed(); } }
 
@@ -166,9 +172,23 @@ namespace TimboJimbo.UI.Layout
         /// <summary>
         /// Which way it scrolls its children: it clips them, lets them run past its edge that way rather than
         /// squeezing them, and can be dragged (rubber-banding past its ends), flicked (gliding to a stop) and wheeled,
-        /// as a UIScrollView.
+        /// as a UIScrollView. Nested in another that scrolls, or inside a node with an <see cref="ILayoutDraggable"/> (a
+        /// sheet), it shares its drags as nested UIScrollViews do: a drag goes to those that scroll the way it sets off,
+        /// innermost first, and what one cannot take (at its end) goes on to what is outside it.
         /// </summary>
         public ScrollAxis Scroll { get => _scroll; set { _scroll = value; Changed(); } }
+
+        /// <summary>
+        /// Which end it keeps to as what it scrolls grows, as SwiftUI's defaultScrollAnchor. Start (the default): its
+        /// offset stays as it is as its range grows. End: it starts at its end (at once, the first time it is laid out)
+        /// and, while it is there (at rest within half a unit of it, or springing to it), stays there as its range grows,
+        /// on each axis it scrolls, as a chat's messages do: on its spring for the change inside
+        /// <see cref="LayoutSystem.Animate"/>, and otherwise at once (or, springing there already, on that spring).
+        /// Scrolled away from its end it stays where it is, and one held by a press or carried by a flick is left to it.
+        /// A <see cref="ScrollTo"/> or <see cref="ScrollOffset"/> in the same change wins, as does a
+        /// <see cref="ScrollIntoView"/> that moves it. Only play mode scrolls.
+        /// </summary>
+        public ScrollAnchor ScrollAnchor { get => _scrollAnchor; set { _scrollAnchor = value; Changed(); } }
 
         /// <summary>
         /// How far its children are scrolled, x right and y down, from 0 (the start) to <see cref="ScrollRange"/>, as
@@ -190,9 +210,23 @@ namespace TimboJimbo.UI.Layout
         /// Scrolls so that <paramref name="descendant"/> (anything inside it) sits <paramref name="anchor"/> of the way
         /// down (or across) what it shows: 0 at the start, 0.5 in the middle, 1 at the end, kept within range. At once,
         /// or inside <see cref="LayoutSystem.Animate"/> on its spring, from where it is and at the speed it is
-        /// scrolling, as SwiftUI's scrollTo.
+        /// scrolling, as SwiftUI's scrollTo. What is lined up is the descendant with the space around it, as CSS's
+        /// scroll-margin, worked out from the layout: on a side with a neighbour in its parent's flow, the gap between
+        /// them (so no sliver of the neighbour shows); on a side where it is first or last in that flow, or across it, its
+        /// parent's padding, and on up through each parent it is at the edge of, to this node's own padding, the start and
+        /// end of its content. So the first child scrolls to the very start and the last to the very end. A floating
+        /// descendant has no space around it, and a floating parent adds none.
         /// </summary>
         public void ScrollTo(LayoutNode descendant, float anchor = 0f) => LayoutSystem.ScrollTo(this, descendant, anchor);
+
+        /// <summary>
+        /// Scrolls only as far as brings <paramref name="descendant"/> (anything inside it), with the space around it
+        /// that <see cref="ScrollTo"/> lines up, wholly into view, to whichever end of what it shows is nearer; not at all
+        /// when it is in view already. For one bigger than what it shows, it moves the least that fills the view with it;
+        /// one that fills the view already is left where it is. As UIKit's scrollRectToVisible and CSS's scrollIntoView
+        /// with 'nearest'. At once, or inside <see cref="LayoutSystem.Animate"/> on its spring, as ScrollTo.
+        /// </summary>
+        public void ScrollIntoView(LayoutNode descendant) => LayoutSystem.ScrollIntoView(this, descendant);
 
         internal void RaiseScrolled(Vector2 offset) => Scrolled?.Invoke(offset);
 
