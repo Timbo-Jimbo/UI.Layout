@@ -7,9 +7,11 @@ namespace TimboJimbo.UI.Layout
     /// A scroll container's indicator: the thin rounded bar the layout system draws along a container's edge while it
     /// scrolls (<see cref="LayoutNode.ShowsScrollIndicators"/>), one for each way it scrolls, on an object of its own
     /// inside the container, hidden and never saved, so the container's clip cuts it as it does what it scrolls. It is
-    /// not added by hand.
+    /// not added by hand. It requires its CanvasRenderer, as every concrete uGUI graphic does (Graphic itself does not):
+    /// added without one, Graphic's lazy lookup gets Unity's placeholder null in the editor and never adds it.
     /// </summary>
     [AddComponentMenu("")]
+    [RequireComponent(typeof(CanvasRenderer))]
     public sealed class LayoutScrollIndicator : MaskableGraphic
     {
         // Segments in each rounded end, and how far past its rect its edge fades to nothing (canvas units): a smooth edge
