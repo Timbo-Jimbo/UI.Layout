@@ -49,18 +49,20 @@ namespace TimboJimbo.UI.Layout
         /// <summary>
         /// The spring of <paramref name="animation"/>, as SwiftUI gives one: from its perceptual duration, about how
         /// long it takes to settle with no bounce, and its bounce, 0 for none (critically damped) and more the further
-        /// it overshoots.
+        /// it overshoots. A duration of 0 is no spring at all: omega is infinite, and <see cref="Step"/> puts it where it
+        /// is going once its delay is up. Whatever sets a spring moving gives it its omega, so none is left infinite.
         /// </summary>
         public static void Parameters(LayoutAnimation animation, out float omega, out float zeta)
         {
-            omega = 2f * Mathf.PI / Mathf.Max(animation.Duration, 0.01f);
+            omega = animation.Duration > 0f ? 2f * Mathf.PI / Mathf.Max(animation.Duration, 0.01f) : float.PositiveInfinity;
             zeta = 1f - Mathf.Clamp(animation.Bounce, 0f, 0.9f);
         }
 
         /// <summary>
         /// Moves it <paramref name="dt"/> seconds on: the rest of its delay first, if it is waiting, then along its
         /// spring for what is left. True once it is within its rest distance of its target on every component and
-        /// slower than its rest speed, when it counts as there (the caller snaps and stops it).
+        /// slower than its rest speed, when it counts as there (the caller snaps and stops it); with no duration (an
+        /// infinite omega), as soon as its delay is up.
         /// </summary>
         public bool Step(float dt)
         {
@@ -73,6 +75,13 @@ namespace TimboJimbo.UI.Layout
                 }
                 dt -= Delay;
                 Delay = 0f;
+            }
+
+            if (float.IsPositiveInfinity(Omega))
+            {
+                Value = Target;
+                Velocity = Vector2.zero;
+                return true;
             }
 
             float x = Value.x - Target.x, vx = Velocity.x;

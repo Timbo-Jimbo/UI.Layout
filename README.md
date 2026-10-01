@@ -48,9 +48,10 @@ LayoutSystem.Animate(() =>
 }).Finished += () => Debug.Log("landed");
 ```
 
-- Each node moves on its own `Animation`: a duration, a bounce, a delay and a curvature that bows its path out.
+- Each node moves on its own `Animation`: a duration, a bounce, a delay and a curvature that bows its path out. A duration of 0 (the None preset) doesn't animate: the node is there at once, after its delay.
 - Nodes turn from where they are when a change interrupts them. `Fling` throws a node with a velocity, `Catch` stops it where it is drawn, and `Velocity` reads how fast it is moving.
 - The returned `LayoutTransition` reports `Finished` and `Completed`, can be `Skip`ped, and carries the type names you gave it. `Animate(update, interactive: false)` lets the pointer through what it moves until it lands.
+- Values you draw yourself (a colour, a corner radius) can move with a change too: `LayoutSystem.AnimateValue` springs one from where it is drawn, the change waiting for it as it waits for its nodes. `LayoutSystem.Current` is the change being made, while `Animate`'s update runs.
 
 ## Show and hide
 

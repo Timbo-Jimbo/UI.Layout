@@ -1,4 +1,5 @@
 using System;
+using System.Linq;
 using TimboJimbo.UI.Layout;
 using UnityEditor;
 using UnityEngine;
@@ -7,9 +8,10 @@ namespace TimboJimboEditor.UI.Layout
 {
     /// <summary>
     /// A layout animation under a foldout, with a row of preset buttons on its header line, then (unfolded) its duration,
-    /// bounce, curvature and delay. The fields are the serialized truth: the preset whose bounce and curvature they
-    /// match is lit, as Box's corner shapes are, and none is once they are changed from all of them (or while
-    /// animations that differ in them are edited together), rather than a Custom button that would do nothing.
+    /// bounce, curvature and delay. The fields are the serialized truth: the preset they match is lit, as Box's corner
+    /// shapes are (None by a duration of 0 alone, the others by their bounce and curvature with a duration), and none is
+    /// once they are changed from all of them (or while animations that differ in them are edited together), rather than
+    /// a Custom button that would do nothing.
     /// </summary>
     [CustomPropertyDrawer(typeof(LayoutAnimation))]
     public sealed class LayoutAnimationDrawer : PropertyDrawer
@@ -18,7 +20,10 @@ namespace TimboJimboEditor.UI.Layout
         // the fields under them.
         private const float PrefixPadding = 2f;
 
-        private static readonly LayoutAnimationPreset[] s_presets = (LayoutAnimationPreset[])Enum.GetValues(typeof(LayoutAnimationPreset));
+        // None first, though it is last in the enum (so presets saved as numbers keep theirs).
+        private static readonly LayoutAnimationPreset[] s_presets = ((LayoutAnimationPreset[])Enum.GetValues(typeof(LayoutAnimationPreset)))
+            .OrderBy(preset => preset != LayoutAnimationPreset.None)
+            .ToArray();
         private static readonly GUIContent[] s_presetNames = PresetNames();
         private static readonly string[] s_fields =
         {
@@ -68,32 +73,44 @@ namespace TimboJimboEditor.UI.Layout
 
         /// <summary>
         /// The preset buttons, the one the animation matches lit. Clicking one sets its bounce and curvature on every
-        /// animation being edited; a preset leaves the duration and delay alone (<see cref="LayoutAnimation.Use"/>
-        /// keeps them), so each keeps its own timing.
+        /// animation being edited, leaving the duration and delay alone (<see cref="LayoutAnimation.Use"/> keeps them),
+        /// so each keeps its own timing; None sets only the duration, to 0, and another preset clicked on an animation
+        /// with none gives it the default duration back.
         /// </summary>
         private static void Presets(Rect rect, SerializedProperty property)
         {
+            var duration = property.FindPropertyRelative(nameof(LayoutAnimation.Duration));
             var bounce = property.FindPropertyRelative(nameof(LayoutAnimation.Bounce));
             var curvature = property.FindPropertyRelative(nameof(LayoutAnimation.Curvature));
 
             EditorGUI.BeginChangeCheck();
-            int clicked = GUI.Toolbar(rect, PresetIndexFor(bounce, curvature), s_presetNames);
+            int clicked = GUI.Toolbar(rect, PresetIndexFor(duration, bounce, curvature), s_presetNames);
             if (EditorGUI.EndChangeCheck() && clicked >= 0)
             {
-                var used = default(LayoutAnimation).Use(s_presets[clicked]);
-                bounce.floatValue = used.Bounce;
-                curvature.floatValue = used.Curvature;
+                var preset = s_presets[clicked];
+                bool none = !duration.hasMultipleDifferentValues && duration.floatValue <= 0f;
+                var used = new LayoutAnimation(none ? 0f : 1f).Use(preset);
+                if (preset == LayoutAnimationPreset.None || none)
+                    duration.floatValue = used.Duration;
+                if (preset != LayoutAnimationPreset.None)
+                {
+                    bounce.floatValue = used.Bounce;
+                    curvature.floatValue = used.Curvature;
+                }
             }
         }
 
-        // The preset the bounce and curvature match, or -1 when they have been changed from all of them or differ
-        // between the animations being edited.
-        private static int PresetIndexFor(SerializedProperty bounce, SerializedProperty curvature)
+        // The preset the animation matches (None by its duration of 0 alone, the others by their bounce and curvature
+        // with a duration), or -1 when it has been changed from all of them or what decides it differs between the
+        // animations being edited.
+        private static int PresetIndexFor(SerializedProperty duration, SerializedProperty bounce, SerializedProperty curvature)
         {
-            if (bounce.hasMultipleDifferentValues || curvature.hasMultipleDifferentValues)
+            if (duration.hasMultipleDifferentValues)
+                return -1;
+            if (duration.floatValue > 0f && (bounce.hasMultipleDifferentValues || curvature.hasMultipleDifferentValues))
                 return -1;
 
-            var animation = new LayoutAnimation(0f, bounce.floatValue, curvature.floatValue);
+            var animation = new LayoutAnimation(duration.floatValue, bounce.floatValue, curvature.floatValue);
             for (int i = 0; i < s_presets.Length; i++)
             {
                 if (animation.Matches(s_presets[i]))
@@ -112,6 +129,9 @@ namespace TimboJimboEditor.UI.Layout
 
         private static string PresetTooltip(LayoutAnimationPreset preset)
         {
+            if (preset == LayoutAnimationPreset.None)
+                return "No animation: it is there at once, after its delay. Sets the duration to 0; the bounce, curvature and delay stay as they are.";
+
             string what = preset switch
             {
                 LayoutAnimationPreset.Smooth => "Settles without overshooting.",
@@ -120,7 +140,7 @@ namespace TimboJimboEditor.UI.Layout
                 LayoutAnimationPreset.Arc => "Settles without overshooting, bowing out sideways on the way.",
                 _ => string.Empty,
             };
-            return what + " Sets the bounce and curvature; the duration and delay stay as they are.";
+            return what + " Sets the bounce and curvature; the duration and delay stay as they are (a duration of 0 goes back to the default).";
         }
     }
 }

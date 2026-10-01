@@ -134,6 +134,7 @@ namespace TimboJimbo.UI.Layout
             s_passing = false;
             s_steppedFrame = -1;
             s_finishing.Clear();
+            s_values.Clear();
             foreach (var state in s_scrolled)
                 state.Scroll.Queued = false;
             s_scrolled.Clear();
@@ -189,6 +190,12 @@ namespace TimboJimbo.UI.Layout
         /// <see cref="Animate(Action, bool, string[])"/> for a change that does not).
         /// </summary>
         public static LayoutTransition Animate(Action update, params string[] types) => Animate(update, true, types);
+
+        /// <summary>
+        /// The change being made, while <see cref="Animate(Action, string[])"/>'s update runs; null otherwise. What draws
+        /// values of its own reads it to move them with the change (<see cref="AnimateValue"/>).
+        /// </summary>
+        public static LayoutTransition Current => s_current;
 
         /// <summary>
         /// Makes the change <paramref name="update"/> makes and animates it, as <see cref="Animate(Action, string[])"/>.
@@ -291,12 +298,16 @@ namespace TimboJimbo.UI.Layout
         {
             if (!s_states.ContainsKey(node))
                 s_states.Add(node, new NodeState(node));
-            if (!s_hooked)
-            {
-                s_hooked = true;
-                Canvas.preWillRenderCanvases += Tick;
-            }
+            Hook();
             Changed(node);
+        }
+
+        // The frame runs from the first node registered, or the first value animated, on.
+        private static void Hook()
+        {
+            if (s_hooked) return;
+            s_hooked = true;
+            Canvas.preWillRenderCanvases += Tick;
         }
 
         // Disabled or destroyed, a node is not drawn, so nothing waits for it: it lets go of the transitions it was
@@ -603,6 +614,7 @@ namespace TimboJimbo.UI.Layout
                 if (scroll != null && scroll.Offset.Transition == transition)
                     StopScrollAt(scroll, scroll.Offset.Target, arrived: true);
             }
+            SkipValues(transition);
             transition.Finish();
         }
 
@@ -715,6 +727,7 @@ namespace TimboJimbo.UI.Layout
                 for (int i = 0; i < s_following.Count; i++)
                     Write(s_following[i]);
                 s_following.Clear();
+                StepValues(playing, step, dt);
             }
             finally
             {
@@ -1522,7 +1535,8 @@ namespace TimboJimbo.UI.Layout
         // something outside it is animating (a nested root's rect) does not cut its motion off. With a transition, it
         // sets off from where it is at the velocity it has, on its node's spring after its delay, held by that
         // transition until it comes to rest or is taken over in turn; a position bows out sideways by the animation's
-        // curvature.
+        // curvature. On an animation with no duration (None), it is put there at once, held by nothing, so it is drawn
+        // there in the frame of the change; with a delay as well, it waits that out and is put there then (Spring.Step).
         private static void Retarget(NodeState state, Spring spring, Vector2 target, LayoutTransition transition)
         {
             spring.Target = target;
@@ -1540,13 +1554,19 @@ namespace TimboJimbo.UI.Layout
             }
 
             var animation = state.Node.Animation;
+            if (animation.AtOnce)
+            {
+                Snap(spring, target, transition);
+                return;
+            }
             Spring.Parameters(animation, out spring.Omega, out spring.Zeta);
             // An opacity never bounces, on the animation's duration and delay: past 1 it would only clip flat, and past
             // 0 it would come back into view (to about half, at the most bounce) as it goes.
             if (spring == state.Opacity)
                 spring.Zeta = 1f;
             spring.Delay = Mathf.Max(0f, animation.Delay);
-            if (spring == state.Position && animation.Curvature > 0f)
+            // No sideways kick on no spring: it is scaled by omega, infinite there.
+            if (spring == state.Position && animation.Curvature > 0f && animation.Duration > 0f)
                 spring.Velocity += Bow(target - spring.Value, animation.Curvature, spring.Omega);
             Hold(spring, transition);
         }
@@ -2085,17 +2105,18 @@ namespace TimboJimbo.UI.Layout
             Debug.LogWarning($"{node.name}.{call}({descendant.name}): {descendant.name} is not laid out inside {node.name}, so it is not scrolled to. (Said once.)", node);
         }
 
-        // Scrolls a container to `offset`: at once without a transition; with one, on the node's own spring (its
-        // Animation's duration, bounce and delay), from where it is drawn at the velocity it has, held by that change.
+        // Scrolls a container to `offset`: at once without a transition, or on an animation with no duration and no delay;
+        // otherwise on the node's own spring (its Animation's duration, bounce and delay), from where it is drawn at the
+        // velocity it has, held by that change.
         private static void MoveScroll(NodeState state, Vector2 offset, LayoutTransition transition)
         {
             var scroll = state.Scroll;
-            if (transition == null)
+            var animation = state.Node.Animation;
+            if (transition == null || animation.AtOnce)
             {
                 StopScrollAt(scroll, offset);
                 return;
             }
-            var animation = state.Node.Animation;
             Spring.Parameters(animation, out float omega, out float zeta);
             SpringScroll(scroll, offset, omega, zeta, Mathf.Max(0f, animation.Delay), transition);
         }

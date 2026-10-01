@@ -478,12 +478,18 @@ namespace TimboJimbo.UI.Layout
 
         // The source fades out, from where it is, on the destination's spring without bouncing, once the destination is
         // well on its way in: after the destination's delay and half its duration, when it is about 82% faded in, so the
-        // two together cover the rect throughout (never less than about 97.6%).
+        // two together cover the rect throughout (never less than about 97.6%). On an animation with no duration, it goes
+        // as the destination comes: at once, or once the delay is up.
         private static void FadeUnder(NodeState source, LayoutAnimation animation, LayoutTransition transition)
         {
             var fade = source.Opacity;
             fade.Target = Vector2.zero;
             if (!fade.Moving && fade.Value == Vector2.zero) return;
+            if (animation.AtOnce)
+            {
+                Snap(fade, Vector2.zero, transition);
+                return;
+            }
             Spring.Parameters(animation, out fade.Omega, out _);
             fade.Zeta = 1f;
             fade.Delay = Mathf.Max(0f, animation.Delay) + Mathf.Max(0f, animation.Duration) * 0.5f;

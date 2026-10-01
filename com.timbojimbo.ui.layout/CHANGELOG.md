@@ -1,5 +1,15 @@
 ## [Unreleased]
 
+### Added
+
+- `LayoutSystem.Current`: the change being made, while `Animate`'s update runs
+- `LayoutSystem.AnimateValue`: a value something draws itself (a colour, a corner radius; up to four components) moves with the change being made as a node's place does: on a spring, from where it is drawn at the velocity it has, held by the change until it comes to rest, and put there when the change is skipped. Outside a change it goes there at once, or, on its way, heads there instead
+- `LayoutAnimationPreset.None`, first in the inspector's presets: no animation, a duration of 0. It is lit by a duration of 0 alone, whatever the bounce and curvature; another preset chosen after it gives the animation the default duration back
+
+### Changed
+
+- A `LayoutAnimation` with a duration of 0 is no animation, as UIKit's zero-duration one: what a change gives somewhere new is there in that change's frame, held by nothing, or with a delay, there once the delay is up. It was a very stiff spring before, which took a frame or more to settle and showed shapes in between (a device turning drawn part way)
+
 ## [0.4.0] - 01/10/2026
 
 The first published release; 0.1.0 to 0.3.0 were never released.
