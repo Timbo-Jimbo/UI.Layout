@@ -64,6 +64,8 @@ Nodes with the same `MatchName` (and `MatchId`, set in code and inherited from a
 - One shown as another is hidden **takes over** from where that one is drawn and flies to its own place, the two cross-fading: a cell zooming into the page it opens.
 - One shown or hidden next to one that **stays shown grows out of it** and shrinks back into it: a dropdown's list out of its button.
 
+`MatchFit` says how a matched node fills the rect it moves through, as CSS's `object-fit`. `MatchWidth`, the default as on the web, keeps it at its own size and scales it, as a picture of itself, evenly to that rect's width; `Fill`, `Contain` and `Cover` scale it to the rect exactly, to fit inside it or to cover it; `Resize` changes the rect's size instead, its content laid out at its own size. `MatchClip` cuts both halves to that rect while they fly. The node taking over decides for the pair.
+
 Pairs and nodes moved to a new parent inside `Animate` fly above everything, out of every clip, until they land.
 
 ## Scrolling

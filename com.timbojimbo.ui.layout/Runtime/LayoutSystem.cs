@@ -706,6 +706,10 @@ namespace TimboJimbo.UI.Layout
                         // Its effect has played out against the node it grew out of or shrank into: drawn by itself again.
                         if (state.Anchor != null && !state.Leaving && AnchorPlayed(state))
                             state.Anchor = null;
+                        // Its size at rest where it is laid out, after taking over from a node by name: drawn as itself
+                        // again, which is the picture of itself at a scale of 1.
+                        if (state.Fitting && !state.Size.Moving && state.Size.Value == state.LaidOutSize)
+                            state.Fitting = false;
                     }
                     for (int i = 0; i < s_visit.Count; i++)
                     {
@@ -1057,6 +1061,7 @@ namespace TimboJimbo.UI.Layout
                         DrawnIn(state.RectTransform, parent.RectTransform, out centre, out size);
                         centre += ScrolledBy(parent);
                     }
+                    state.LaidOutSize = size;
                     Retarget(state, state.Position, centre, null);
                     Retarget(state, state.Size, size, null);
                 }
@@ -1087,7 +1092,10 @@ namespace TimboJimbo.UI.Layout
                 bool laidOut = parent != null && state.PassIndex >= 0;
                 Vector2 centre = default, size = default;
                 if (laidOut)
+                {
                     TargetOf(state, out centre, out size);
+                    state.LaidOutSize = size;
+                }
                 // Caught, each value it was stopped with stays where it was stopped while it is still given what it was
                 // then; given something new for it, that one is let go of and goes there as any node's does (a drag
                 // setting its Scale leaves its opacity held). Not drawn (something above it left layout and came back),
@@ -1202,13 +1210,15 @@ namespace TimboJimbo.UI.Layout
         // rect springs there. A root keeps the rect it is given, which is its size; what has left layout keeps the size
         // it had, and is drawn as it was while it fades. So does a thrown node: a follower whose pair ended early is left
         // at the drawn size of the node it followed, while its content stays laid out at its own size, as it was drawn
-        // while following (told the drawn size, a wrapped or centred text would re-wrap or shift once).
+        // while following (told the drawn size, a wrapped or centred text would re-wrap or shift once). A node drawn as a
+        // picture of itself after taking over by name (Fitting) keeps it laid out at the size it is laid out at, caught
+        // short of there or not, so a catch pauses the picture as drawn.
         private static void Arrange(NodeState state)
         {
             if (state.PassIndex < 0 || state.Thrown) return;
             var content = s_solver[state.PassIndex].Content;
             if (content != null)
-                content.Arrange(state.PassParent != null ? state.Size.Target : Unarranged);
+                content.Arrange(state.PassParent == null ? Unarranged : state.Fitting ? state.LaidOutSize : state.Size.Target);
         }
 
         // Where the solver put a node: its rect's centre, moved by its Offset (y up), and its size. One floating against
@@ -1692,7 +1702,8 @@ namespace TimboJimbo.UI.Layout
         // them while anything above it takes no pointer. One is added only once it is needed (faded, or not to be
         // clicked). A node following the one that took over from it by name is drawn at that one's rect instead, at its
         // own opacity, and takes no pointer; a destination flying, which ignores its parent groups, is drawn at its
-        // opacity times what theirs are going to.
+        // opacity times what theirs are going to. Taking over by name or growing out of an anchor, it fills the rect it
+        // moves through by its MatchFit, and while it flies with MatchClip it is cut to it (LayoutSystem.Match.cs).
         private static void Write(NodeState state)
         {
             var node = state.Node;
@@ -1707,8 +1718,13 @@ namespace TimboJimbo.UI.Layout
                 var centre = state.Position.Value + SlideOf(state) - ScrolledBy(state.Parent);
                 // A bouncy spring shrinking to nothing swings past it: it stops at nothing rather than turning inside out.
                 var size = Vector2.Max(DrawnSizeOf(state), Vector2.zero);
-                WriteRect(state.RectTransform, centre, size, DrawnScaleOf(state));
+                if (Fitted(state))
+                    WriteFitted(state, centre, size, DrawnScaleOf(state), node.MatchFit);
+                else
+                    WriteRect(state.RectTransform, centre, size, DrawnScaleOf(state));
             }
+            if (state.Flight != null)
+                CutToMatch(state);
 
             bool visible = node.Display == DisplayMode.Visible;
             // Drawn by its Display as it was last placed: inside a held node that waits until the node is let go of
@@ -1733,7 +1749,11 @@ namespace TimboJimbo.UI.Layout
         // Puts a node's RectTransform at `centre` and `size` in its parent's layout space (y down, from its top-left
         // corner, as drawn: any scroll already taken off), scaled around its centre: anchored at that corner and
         // pivoted on its centre.
-        private static void WriteRect(RectTransform rt, Vector2 centre, Vector2 size, float scale)
+        private static void WriteRect(RectTransform rt, Vector2 centre, Vector2 size, float scale) =>
+            WriteRect(rt, centre, size, new Vector2(scale, scale));
+
+        // The same, scaled by as much as `scale` says along each of its axes (a picture of a node fitted to a rect).
+        private static void WriteRect(RectTransform rt, Vector2 centre, Vector2 size, Vector2 scale)
         {
             var anchor = new Vector2(0f, 1f);
             if (rt.anchorMin != anchor) rt.anchorMin = anchor;
@@ -1743,7 +1763,7 @@ namespace TimboJimbo.UI.Layout
             var position = new Vector2(centre.x, -centre.y);
             if (rt.anchoredPosition != position) rt.anchoredPosition = position;
             if (rt.sizeDelta != size) rt.sizeDelta = size;
-            var scaled = new Vector3(scale, scale, 1f);
+            var scaled = new Vector3(scale.x, scale.y, 1f);
             if (rt.localScale != scaled) rt.localScale = scaled;
         }
 

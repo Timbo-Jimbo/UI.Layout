@@ -10,9 +10,11 @@ namespace TimboJimboEditor.UI.Layout
     /// it lays out what is inside it (and the safe area it keeps clear of, or reaches past), which way it scrolls that,
     /// which end it keeps to, where it comes to rest and whether it shows indicators, where and how it is drawn apart from
     /// that (floating, moved by its offset, scaled and faded), then how it moves: its animation, how it appears and
-    /// disappears, and the name it is matched by. What does not apply is hidden: its height while its aspect ratio sets
-    /// it from its width, the safe area a root keeps on any other node and the one a node reaches past on a root, its
-    /// scroll anchor, snap and indicators while it does not scroll, the indicators' colour while it shows none, and,
+    /// disappears, and the name it is matched by, with how it fills the rect it moves through then and whether it is cut
+    /// to it. What does not apply is hidden: its height while its aspect ratio sets it from its width, the safe area a
+    /// root keeps on any other node and the one a node reaches past on a root, its scroll anchor, snap and indicators
+    /// while it does not scroll, the indicators' colour while it shows none, its match fit and clip while it has no name,
+    /// and,
     /// through their drawers, a sizing's value but for fixed and percent, a wrap's count but for a grid and its min size
     /// but for an adaptive one, a floating's placement but while it floats, and its element but while it floats against
     /// one. In play mode a scroll container also shows, read only, how far it is scrolled, how far it can be, and whether
@@ -55,14 +57,18 @@ namespace TimboJimboEditor.UI.Layout
         private SerializedProperty _animation;
         private SerializedProperty _displayEffect;
         private SerializedProperty _matchName;
+        private SerializedProperty _matchFit;
+        private SerializedProperty _matchClip;
 
-        // The scroll settings under their group's header, where "Scroll" again would only repeat it; their tooltips are
-        // the fields' own.
+        // The scroll settings under their group's header, where "Scroll" again would only repeat it, and the match
+        // settings under the name; their tooltips are the fields' own.
         private GUIContent _scrollLabel;
         private GUIContent _scrollAnchorLabel;
         private GUIContent _scrollSnapLabel;
         private GUIContent _indicatorsLabel;
         private GUIContent _indicatorColorLabel;
+        private GUIContent _matchFitLabel;
+        private GUIContent _matchClipLabel;
 
         // The readouts as last painted, so the inspector is drawn again only while one is out of date.
         private Vector2 _shownOffset;
@@ -97,11 +103,15 @@ namespace TimboJimboEditor.UI.Layout
             _animation = serializedObject.FindProperty("_animation");
             _displayEffect = serializedObject.FindProperty("_displayEffect");
             _matchName = serializedObject.FindProperty("_matchName");
+            _matchFit = serializedObject.FindProperty("_matchFit");
+            _matchClip = serializedObject.FindProperty("_matchClip");
             _scrollLabel = new GUIContent("Axis", _scroll.tooltip);
             _scrollAnchorLabel = new GUIContent("Anchor", _scrollAnchor.tooltip);
             _scrollSnapLabel = new GUIContent("Snap", _scrollSnap.tooltip);
             _indicatorsLabel = new GUIContent("Indicators", _showsScrollIndicators.tooltip);
             _indicatorColorLabel = new GUIContent("Indicator Color", _scrollIndicatorColor.tooltip);
+            _matchFitLabel = new GUIContent("Fit", _matchFit.tooltip);
+            _matchClipLabel = new GUIContent("Clip", _matchClip.tooltip);
         }
 
         public override void OnInspectorGUI()
@@ -158,6 +168,15 @@ namespace TimboJimboEditor.UI.Layout
             EditorGUILayout.PropertyField(_animation);
             EditorGUILayout.PropertyField(_displayEffect);
             EditorGUILayout.PropertyField(_matchName);
+            // How it fills the rect it moves through, and whether it is cut to it, only mean something for a node with a
+            // name; while nodes that differ in it are edited together, they show.
+            if (_matchName.hasMultipleDifferentValues || _matchName.stringValue.Length > 0)
+            {
+                EditorGUI.indentLevel++;
+                EditorGUILayout.PropertyField(_matchFit, _matchFitLabel);
+                EditorGUILayout.PropertyField(_matchClip, _matchClipLabel);
+                EditorGUI.indentLevel--;
+            }
             MatchIdReadout();
 
             serializedObject.ApplyModifiedProperties();

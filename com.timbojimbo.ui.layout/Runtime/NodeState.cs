@@ -1,4 +1,6 @@
+using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.UI;
 
 namespace TimboJimbo.UI.Layout
 {
@@ -85,6 +87,24 @@ namespace TimboJimbo.UI.Layout
         public NodeState Anchor;
         public Vector2 AnchorCentre;
         public Vector2 AnchorSize;
+
+        // Whether it took over from a node by name and its size has not come to rest at the size it is laid out at since:
+        // until then it is drawn through the rect its size springs through by its MatchFit, as a picture of itself, and a
+        // catch holding it short of there pauses it as that picture (LayoutSystem.Match.cs).
+        public bool Fitting;
+
+        // The size the last pass that laid it out gave it, which its content is laid out for: its size's target, but for
+        // while a catch holds it short of there, something above it is held (it keeps where it was stopped), or it is
+        // thrown.
+        public Vector2 LaidOutSize;
+
+        // The RectMask2D that cuts it to the rect it moves through while it flies matched by name with MatchClip on
+        // (LayoutSystem.Match.cs): added hidden and never saved, or found hidden on it (a scroll container clips with the
+        // same one), and kept turned off between times; null until it is first needed. Whether it cuts now, and the
+        // graphics on its own object it was given to cut then, which a RectMask2D never cuts by itself.
+        public RectMask2D MatchMask;
+        public bool MatchMasking;
+        public List<MaskableGraphic> MatchMasked;
 
         // Whether the system drives its RectTransform (every node but a root), and the tracker that tells the editor
         // so: it shows those values as driven, and does not save them into the scene.

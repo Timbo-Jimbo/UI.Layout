@@ -81,6 +81,12 @@ namespace TimboJimbo.UI.Layout
         // Code only, and never saved: an id is usually an object of the game's (an author, an item).
         [NonSerialized] private object _matchId;
 
+        [Tooltip("Taking over from a node by name, or growing out of one that stays shown: how it fills the rect it moves through, as CSS's object-fit. Every mode but Resize keeps it at its own size, as a picture of itself, scaled onto the rect, centred: Match Width (the default, as the web's) evenly to its width, Fill to it exactly, Contain and Cover evenly to fit inside it or to cover it. Resize changes the rect's size instead. The node taking over decides for both.")]
+        [SerializeField] private MatchFit _matchFit = MatchFit.MatchWidth;
+
+        [Tooltip("Taking over from a node by name, or growing out of one that stays shown: whether it, and the node it takes over from, are cut to the rect they move through while they fly. With Cover it crops; with Resize it uncovers what is inside, laid out at its final size.")]
+        [SerializeField] private bool _matchClip;
+
         [Tooltip("Which way it scrolls its children: it clips them, lets them run past its edge that way, and can be dragged, flicked and wheeled, as a UIScrollView.")]
         [SerializeField] private ScrollAxis _scroll;
 
@@ -221,6 +227,29 @@ namespace TimboJimbo.UI.Layout
         /// is not used). Never saved.
         /// </summary>
         public object MatchId { get => _matchId; set { _matchId = value; Changed(); } }
+
+        /// <summary>
+        /// How it fills the rect it moves through when it takes over from a node by name (<see cref="MatchName"/>), from
+        /// that node's rect to its own, or grows out of one that stays shown, as CSS's <c>object-fit</c> fills a view
+        /// transition's group. Every mode but Resize keeps it at its own laid-out size, as a picture of itself, and scales
+        /// it onto the rect, centred: <see cref="MatchFit.MatchWidth"/>, the default as on the web, evenly to its width;
+        /// <see cref="MatchFit.Fill"/> to it exactly; <see cref="MatchFit.Contain"/> and <see cref="MatchFit.Cover"/>
+        /// evenly to fit inside it or to cover it. <see cref="MatchFit.Resize"/> changes the rect's size instead, what is
+        /// inside it laid out at its own size and pinned at its top left. The node it takes over from is drawn the same
+        /// way at its own size: the node taking over decides for both. Caught on its way, it is held as it is drawn, the
+        /// picture and all, until it is let go of and its size has come to rest.
+        /// </summary>
+        public MatchFit MatchFit { get => _matchFit; set { _matchFit = value; Changed(); } }
+
+        /// <summary>
+        /// Whether, as it takes over from a node by name or grows out of one that stays shown, it and the node it takes over
+        /// from are cut to the rect they move through while they fly (rectangular, as a RectMask2D cuts; rounded corners are
+        /// a masking Box's of its own). With <see cref="MatchFit.Cover"/> it crops the picture; with
+        /// <see cref="MatchFit.Resize"/> it uncovers what is inside, laid out at its final size. The node taking over
+        /// decides for both. Caught on its way, it lands, and is cut no more. A node that clips by itself already (a scroll
+        /// container, or one with a RectMask2D of its own) clips as it does.
+        /// </summary>
+        public bool MatchClip { get => _matchClip; set { _matchClip = value; Changed(); } }
 
         /// <summary>
         /// Which way it scrolls its children: it clips them, lets them run past its edge that way rather than

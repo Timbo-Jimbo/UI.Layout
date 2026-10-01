@@ -321,12 +321,13 @@ namespace TimboJimbo.UI.Layout
         private static void StandDown(NodeState state) => LeaveLayer(state);
 
         // Takes a node out of the layer, its canvas's sorting put back as it was before it flew, so that it no longer
-        // sorts above everything, and a pair half's parent groups put back. Returns what it changed to fly it, or null
-        // when it was not flying.
+        // sorts above everything, and a pair half's parent groups put back; cut to the rect it moved through, it is cut
+        // no more (LayoutSystem.Match.cs). Returns what it changed to fly it, or null when it was not flying.
         private static FlightState LeaveLayer(NodeState state)
         {
             var flight = state.Flight;
             if (flight == null) return null;
+            Uncut(state);
             state.Flight = null;
             s_flights.Remove(state);
             var canvas = flight.Canvas;

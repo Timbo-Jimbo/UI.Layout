@@ -185,6 +185,29 @@ namespace TimboJimbo.UI.Layout
         Children,
     }
 
+    /// <summary>
+    /// How a node matched by name fills the rect it moves through, from the other node's rect to its own, as CSS's
+    /// <c>object-fit</c> fills a view transition's group with its snapshots: resized to it, or kept at its own laid-out
+    /// size, as a picture of itself, and scaled onto it, centred.
+    /// </summary>
+    public enum MatchFit
+    {
+        /// <summary>Scaled evenly to the rect's width, running past it or short of it down its height, as the web scales its snapshots.</summary>
+        MatchWidth,
+
+        /// <summary>The rect itself changes size; nothing is scaled, and what is inside is laid out at its own size, pinned at its top left.</summary>
+        Resize,
+
+        /// <summary>Scaled on each axis to fill the rect exactly, its content stretched or squashed on the way.</summary>
+        Fill,
+
+        /// <summary>Scaled evenly so that all of it fits inside the rect.</summary>
+        Contain,
+
+        /// <summary>Scaled evenly so that it covers the whole rect, running past it (Match Clip crops it).</summary>
+        Cover,
+    }
+
     /// <summary>One of nine points on a rect: a corner, the middle of an edge, or its centre.</summary>
     public enum AttachPoint
     {

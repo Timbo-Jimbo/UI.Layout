@@ -5,9 +5,12 @@
 - `LayoutSystem.Current`: the change being made, while `Animate`'s update runs
 - `LayoutSystem.AnimateValue`: a value something draws itself (a colour, a corner radius; up to four components) moves with the change being made as a node's place does: on a spring, from where it is drawn at the velocity it has, held by the change until it comes to rest, and put there when the change is skipped. Outside a change it goes there at once, or, on its way, heads there instead
 - `LayoutAnimationPreset.None`, first in the inspector's presets: no animation, a duration of 0. It is lit by a duration of 0 alone, whatever the bounce and curvature; another preset chosen after it gives the animation the default duration back
+- `LayoutNode.MatchFit`: how a node taking over by name, or growing out of one that stays shown, fills the rect it moves through, as CSS's object-fit. `MatchWidth` (the default, as on the web), `Fill`, `Contain` and `Cover` draw it as a picture of itself, at its own laid-out size, scaled onto that rect and centred; `Resize` changes the rect's size, as before. The node it takes over from is drawn the same way, and a catch on the way holds the picture as drawn. In the inspector as lit buttons under the match name
+- `LayoutNode.MatchClip`: both halves of a pair, or a node growing out of one, are cut to the rect they move through while they fly: Cover crops, Resize uncovers content laid out at its final size
 
 ### Changed
 
+- A node taking over by name, or growing out of another, is scaled as a picture of itself to the rect it moves through by default (`MatchFit.MatchWidth`), where it was resized before; set `MatchFit` to `Resize` for the old look (a dropdown's list growing out of its button wants it)
 - A `LayoutAnimation` with a duration of 0 is no animation, as UIKit's zero-duration one: what a change gives somewhere new is there in that change's frame, held by nothing, or with a delay, there once the delay is up. It was a very stiff spring before, which took a frame or more to settle and showed shapes in between (a device turning drawn part way)
 
 ## [0.4.0] - 01/10/2026

@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.UI;
 
 namespace TimboJimbo.UI.Layout
 {
@@ -27,6 +28,12 @@ namespace TimboJimbo.UI.Layout
         // its button), fading if its effect fades, and flying until the effect has played. What is inside it is laid out
         // at its own size, pinned at its top left. For a hand-off instead (a cell zooming into the page it opens), the
         // other is hidden in the same change.
+        //
+        // How a node fills the rect it moves through (a destination its size's, from its source's rect to its own; one
+        // growing out of an anchor from that one's; a follower the rect of the node it follows) is the MatchFit of the
+        // node taking over, or growing: Resize puts its rect there, as above; every other mode draws it as a picture of
+        // itself, at the size its content is laid out at, scaled onto that rect, centred, as CSS's object-fit fills a view
+        // transition's group with its snapshots. With MatchClip, both halves are cut to that rect while they fly.
 
         // Whether the pass under way is Animate's pass for its change, which notes who holds each name before and after.
         private static bool s_matching;
@@ -273,17 +280,18 @@ namespace TimboJimbo.UI.Layout
             // Where it is drawn as the passes before the change's update left it, as the in-view test read it: what they
             // put somewhere at once (an Offset a drag moved in the same frame, taken up by the fling letting go of it, or
             // a scroll put back just before) is not drawn there until the frame, so it and what it is inside are written
-            // first. A follower is drawn at the node it follows, so that is the rect read for one, and how fast it grows.
+            // first. A follower is drawn through the rect of the node it follows, so that is the rect read for one, and
+            // how fast it grows; one drawn as a picture of itself, the rect it is drawn through.
             var drawn = source.Follows ?? source;
             WriteDown(drawn);
-            drawn.RectTransform.GetWorldCorners(s_corners);
+            GroupCorners(drawn, out var bottomLeft, out var topRight);
             var space = SpaceOf(drawn);
             s_pairs.Add(new Pair
             {
                 Source = source,
                 Destination = destination,
-                BottomLeft = s_corners[0],
-                TopRight = s_corners[2],
+                BottomLeft = bottomLeft,
+                TopRight = topRight,
                 Velocity = DrawnVelocity(source),
                 SizeVelocity = space != null ? Vector2.Scale(drawn.Size.Velocity, UnitOf(space)) : Vector2.zero,
             });
@@ -394,12 +402,14 @@ namespace TimboJimbo.UI.Layout
                 new Vector2(local.x, -local.y) + ScrollVelocityOf(parent), transition);
 
             // Size likewise, from the source's drawn size over its own scale, which goes where it goes at once. It is
-            // shown at once too: the pair plays in place of its DisplayEffect.
+            // shown at once too: the pair plays in place of its DisplayEffect. Its size is the rect it moves through,
+            // which it fills by its MatchFit until that comes to rest where it is laid out.
             float scale = destination.Scale.Target.x;
             if (scale < 1e-4f) scale = 1f;
             var unit = UnitOf(space);
             var growing = new Vector2(unit.x > 0f ? pair.SizeVelocity.x / unit.x : 0f, unit.y > 0f ? pair.SizeVelocity.y / unit.y : 0f);
             SetOffFrom(destination, destination.Size, size / scale, growing / scale, transition);
+            destination.Fitting = true;
             Snap(destination.Scale, destination.Scale.Target, transition);
             Snap(destination.Shown, destination.Shown.Target, transition);
 
@@ -540,17 +550,18 @@ namespace TimboJimbo.UI.Layout
 
         // ── Following ────────────────────────────────────────────────────────────
 
-        // A follower is drawn at the rect of the node it follows as that is drawn this frame (written already: what is
-        // followed is never a follower, and followers are written once every tree has been), at a scale of 1, so its
-        // content is laid out at its own size, pinned at its top left. Under a parent drawn at a scale of about nothing
-        // (riding a page that shrinks away), it is left where it is, unseen with that page.
+        // A follower is drawn through the rect the node it follows moves through this frame (its parent written already:
+        // what is followed is never a follower, and followers are written once every tree has been), filling it as that
+        // node's MatchFit says: resized to it, its content laid out at its own size and pinned at its top left, or as a
+        // picture of itself scaled onto it. Under a parent drawn at a scale of about nothing (riding a page that shrinks
+        // away), it is left where it is, unseen with that page.
         private static void DrawOver(NodeState state)
         {
             var space = SpaceOf(state);
             if (space == null || Degenerate(space)) return;
-            state.Follows.RectTransform.GetWorldCorners(s_corners);
-            CornersIn(s_corners[0], s_corners[2], space, out var centre, out var size);
-            WriteRect(state.RectTransform, centre, size, 1f);
+            GroupCorners(state, out var bottomLeft, out var topRight);
+            CornersIn(bottomLeft, topRight, space, out var centre, out var size);
+            WriteFitted(state, centre, size, 1f, state.Follows.Node.MatchFit);
         }
 
         // A destination flying ignores its parent groups, so it is drawn at its own opacity times where the opacity of
@@ -563,6 +574,166 @@ namespace TimboJimbo.UI.Layout
             for (var above = state.PassParent ?? state.Above; above != null; above = above.PassParent ?? above.Above)
                 opacity *= Mathf.Clamp01(above.Opacity.Target.x);
             return opacity;
+        }
+
+        // ── Fitting ──────────────────────────────────────────────────────────────
+
+        // Whether a node fills the rect it moves through by its own MatchFit: growing out of or shrinking back into an
+        // anchor, or having taken over from a node by name until its size has come to rest where it is laid out
+        // (Fitting).
+        private static bool Fitted(NodeState state) => state.Anchor != null || state.Fitting;
+
+        // The size a node is drawn at as a picture of itself, before it is scaled onto the rect it moves through: having
+        // taken over by name, the size it is laid out at (which its size springs to from its source's, or is held short
+        // of by a catch); otherwise its size as it is drawn by itself (growing out of an anchor, or following another
+        // through that one's rect).
+        private static Vector2 PictureSizeOf(NodeState state) =>
+            Vector2.Max(state.Fitting && state.Anchor == null ? state.LaidOutSize : state.Size.Value, Vector2.zero);
+
+        // Writes a node through a rect, `centre` and `size` in its parent's layout space, scaled by `scale` around its
+        // centre, as `fit` fills it: resized, its rect is that rect; otherwise its rect is its picture size, scaled onto
+        // that rect around its centre.
+        private static void WriteFitted(NodeState state, Vector2 centre, Vector2 size, float scale, MatchFit fit)
+        {
+            if (fit == MatchFit.Resize)
+            {
+                WriteRect(state.RectTransform, centre, size, scale);
+                return;
+            }
+            var picture = PictureSizeOf(state);
+            WriteRect(state.RectTransform, centre, picture, FitScale(fit, size, picture) * scale);
+        }
+
+        // How much a picture `picture` big is scaled along each axis to fill a rect `size` big as `fit` says: Fill each
+        // way to it, Contain and Cover evenly to fit inside it or to cover it, MatchWidth evenly to its width. Along an
+        // axis it has no length on, it takes the other's scale.
+        private static Vector2 FitScale(MatchFit fit, Vector2 size, Vector2 picture)
+        {
+            float x = picture.x > 1e-5f ? size.x / picture.x : 1f;
+            float y = picture.y > 1e-5f ? size.y / picture.y : x;
+            if (picture.x <= 1e-5f)
+                x = y;
+            switch (fit)
+            {
+                case MatchFit.Fill: return new Vector2(x, y);
+                case MatchFit.Contain: return Vector2.one * Mathf.Min(x, y);
+                case MatchFit.Cover: return Vector2.one * Mathf.Max(x, y);
+                case MatchFit.MatchWidth: return new Vector2(x, x);
+                default: return Vector2.one;
+            }
+        }
+
+        // The world corners (bottom left, top right) of the rect a node moves through: for a follower, the one the node it
+        // follows moves through; for any other, its rect as its springs draw it by itself (its centre moved by its slide
+        // and back by its parent's scroll, its size from its anchor's while it grows out of one, scaled around its
+        // centre), which a picture of it is scaled onto. Its parent is written already. A root's is its rect.
+        private static void GroupCorners(NodeState state, out Vector3 bottomLeft, out Vector3 topRight)
+        {
+            if (state.Follows != null)
+                state = state.Follows;
+            var space = SpaceOf(state);
+            if (space == null)
+            {
+                state.RectTransform.GetWorldCorners(s_corners);
+                bottomLeft = s_corners[0];
+                topRight = s_corners[2];
+                return;
+            }
+            var centre = state.Position.Value + SlideOf(state) - ScrolledBy(state.Parent);
+            var half = Vector2.Max(DrawnSizeOf(state), Vector2.zero) * (DrawnScaleOf(state) * 0.5f);
+            var rect = space.rect;
+            bottomLeft = space.TransformPoint(new Vector3(rect.xMin + centre.x - half.x, rect.yMax - centre.y - half.y, 0f));
+            topRight = space.TransformPoint(new Vector3(rect.xMin + centre.x + half.x, rect.yMax - centre.y + half.y, 0f));
+        }
+
+        // ── Cutting ──────────────────────────────────────────────────────────────
+
+        // While a node flies as half of a pair, or grows out of an anchor, with MatchClip on (the node taking over says,
+        // or the one growing), it is cut to the rect it moves through: a RectMask2D on it, inset from its rect to that
+        // one in its root canvas's units, as a RectMask2D's padding is. Resized or filled, it is drawn at that rect
+        // already, and nothing is inset. Its flight's canvas keeps every clip above it from cutting it
+        // (LayoutSystem.Flight.cs), so that is all that cuts it. A node that scrolls, or has a RectMask2D of the user's,
+        // is cut by that as it is.
+        private static void CutToMatch(NodeState state)
+        {
+            var match = state.Follows ?? state;
+            if ((!state.Flight.PairHalf && state.Anchor == null) || !match.Node.MatchClip || !TryMask(state))
+            {
+                Uncut(state);
+                return;
+            }
+            var padding = Vector4.zero;
+            var fit = match.Node.MatchFit;
+            var canvas = fit != MatchFit.Resize && fit != MatchFit.Fill ? RootCanvasOf(state) : null;
+            if (canvas != null)
+            {
+                GroupCorners(state, out var bottomLeft, out var topRight);
+                var root = canvas.transform;
+                state.RectTransform.GetWorldCorners(s_corners);
+                Vector2 min = root.InverseTransformPoint(s_corners[0]), max = root.InverseTransformPoint(s_corners[2]);
+                Vector2 cutMin = root.InverseTransformPoint(bottomLeft), cutMax = root.InverseTransformPoint(topRight);
+                padding = new Vector4(cutMin.x - min.x, cutMin.y - min.y, max.x - cutMax.x, max.y - cutMax.y);
+            }
+            // Every graphic inside it is told of a new padding, so it is set only when it changes.
+            if (state.MatchMask.padding != padding)
+                state.MatchMask.padding = padding;
+        }
+
+        // Turns on the RectMask2D a node is cut with, and gives it the graphics on the node's own object to cut, which a
+        // RectMask2D never cuts by itself (those inside it, it finds as it turns on). It is added the first time, hidden
+        // and never saved, unless a hidden one is there to take up (a scroll container's clip from when it scrolled).
+        // False for a node that scrolls, or has a RectMask2D of the user's, which cuts it as it is.
+        private static bool TryMask(NodeState state)
+        {
+            if (state.Scroll != null && state.Scroll.Axis != ScrollAxis.None) return false;
+            var mask = state.MatchMask;
+            if (mask == null)
+            {
+                var go = state.Node.gameObject;
+                if (!go.TryGetComponent(out mask))
+                    mask = Hide(go.AddComponent<RectMask2D>());
+                else if (!IsHidden(mask))
+                    return false;
+                state.MatchMask = mask;
+            }
+            // Turned off since by something else (a scroll container's clip it shares, stopping), which let go of the
+            // graphics it was given: they are given again.
+            if (state.MatchMasking && mask.enabled) return true;
+            if (!mask.enabled) mask.enabled = true;
+            state.MatchMasking = true;
+            var own = state.MatchMasked ??= new List<MaskableGraphic>();
+            state.Node.GetComponents(own);
+            for (int i = own.Count - 1; i >= 0; i--)
+            {
+                if (own[i].maskable)
+                    mask.AddClippable(own[i]);
+                else
+                    own.RemoveAt(i);
+            }
+            return true;
+        }
+
+        // Stops cutting a node: the graphics on its own object are taken back from its mask, which cuts them no more, and
+        // the mask is inset by nothing again and turned off, unless the node scrolls now, whose clip it is then.
+        private static void Uncut(NodeState state)
+        {
+            if (!state.MatchMasking) return;
+            state.MatchMasking = false;
+            var mask = state.MatchMask;
+            var own = state.MatchMasked;
+            if (mask != null)
+            {
+                for (int i = 0; i < own.Count; i++)
+                {
+                    if (own[i] != null)
+                        mask.RemoveClippable(own[i]);
+                }
+                if (mask.enabled && (state.Scroll == null || state.Scroll.Axis == ScrollAxis.None))
+                    mask.enabled = false;
+                if (mask.padding != Vector4.zero)
+                    mask.padding = Vector4.zero;
+            }
+            own.Clear();
         }
 
         // ── Landing and ending ───────────────────────────────────────────────────
