@@ -1,7 +1,9 @@
 using System;
 using System.Collections.Generic;
+using TimboJimbo.Motion;
 using UnityEngine;
 using UnityEngine.UI;
+using static TimboJimbo.Motion.MotionSystem;
 
 namespace TimboJimbo.UI.Layout
 {
@@ -17,7 +19,10 @@ namespace TimboJimbo.UI.Layout
         // takes over from it. The destination is given the source's presentation, where it is drawn and how fast it is
         // drawn moving there, and then moves to its own place on its own springs for the change, as any node does,
         // fading in. The source follows it, drawn at its rect beneath it and fading out from halfway, until the pair
-        // lands (or it is shown again with no new pair, when it stops following and comes back as itself). Both fly
+        // lands (or it is shown again with no new pair, when it stops following and comes back as itself). The pair moves
+        // on the destination's animation for the change (its own Animation, one it inherits, or the change's), the
+        // source's fade too, so the node taking over decides for both, as it does their MatchFit: an Animation given to
+        // one end of a pair plays the way it is taken over to, and the other way the other end's. Both fly
         // (LayoutSystem.Flight.cs), ignoring their parent groups, so neither a clip nor a page's fade cuts them on the
         // way. What is inside the destination rides it, laid out at its own size and pinned at its top left; what is
         // inside the source rides that.
@@ -184,7 +189,7 @@ namespace TimboJimbo.UI.Layout
         // in it. Where every source is drawn is read before any destination's ancestors are written; then each
         // destination takes over from its source, in the same order, so a nested destination takes over inside an outer
         // one already where its own source is drawn.
-        private static void MatchPairs(LayoutTransition transition)
+        private static void MatchPairs(MotionTransition transition)
         {
             try
             {
@@ -215,7 +220,7 @@ namespace TimboJimbo.UI.Layout
         // hand-off (TakeOver). The other staying shown, it is this one's anchor (AnchorTo), if this one plays its own
         // effect in the change (its shown value set off by it) rather than riding what above it comes or goes, which
         // plays nothing of its own to grow or shrink by.
-        private static void FindPartner(NodeState state, LayoutTransition transition)
+        private static void FindPartner(NodeState state, MotionTransition transition)
         {
             bool shown = state.PassShown;
             string name = shown ? state.PassName : state.WasName;
@@ -367,7 +372,7 @@ namespace TimboJimbo.UI.Layout
 
         // The destination takes over from where the source is drawn, channel by channel, then both board the flight
         // layer, the destination directly above the source (turning back, each keeps the place it has there).
-        private static void TakeOver(in Pair pair, LayoutTransition transition)
+        private static void TakeOver(in Pair pair, MotionTransition transition)
         {
             var source = pair.Source;
             var destination = pair.Destination;
@@ -413,15 +418,30 @@ namespace TimboJimbo.UI.Layout
             Snap(destination.Scale, destination.Scale.Target, transition);
             Snap(destination.Shown, destination.Shown.Target, transition);
 
-            // The cross-fade. The destination fades in from nothing, or, turning back, from where it is. Flying for
-            // another pair, it is not drawn where it now sets off from (a header opened again from another row while it
-            // still follows the last), so it fades in from nothing too. The source fades out beneath it; and the
-            // source's shown value stops where it was going, since it is drawn at the destination's rect rather than at
-            // its own away pose.
-            if (!reversal)
-                Snap(destination.Opacity, Vector2.zero, transition);
-            Retarget(destination, destination.Opacity, new Vector2(OpacityTargetOf(destination), 0f), transition);
-            FadeUnder(source, destination.Node.Animation, transition);
+            // The cross-fade: the half drawn on top fades from where it is, at once, and the half beneath it covers the
+            // rect meanwhile. Taking over, the destination is on top: it fades in from nothing, or, turning back, from
+            // where it is. Flying for another pair, it is not drawn where it now sets off from (a header opened again
+            // from another row while it still follows the last), so it fades in from nothing too. The source fades out
+            // beneath it once it is well on its way in. Turning back with the destination still beneath the source (each
+            // keeps its place in the layer, as the pair first boarded), it is the other way up: the destination is put at
+            // its opacity at once, unseen beneath the source (the two leave no more of the rect uncovered than the
+            // cross-fade does, about 2.4% at the most), and the source fades out from where it is, so the turn shows from
+            // the moment it is made rather than once a fade beneath it is under way. Either way the source's shown value
+            // stops where it was going, since it is drawn at the destination's rect rather than at its own away pose.
+            var opacity = new Vector2(OpacityTargetOf(destination), 0f);
+            var animation = AnimationOf(destination, transition);
+            if (reversal && Beneath(destination, source))
+            {
+                Snap(destination.Opacity, opacity, transition);
+                FadeOut(source, animation, false, transition);
+            }
+            else
+            {
+                if (!reversal)
+                    Snap(destination.Opacity, Vector2.zero, transition);
+                Retarget(destination, destination.Opacity, opacity, transition);
+                FadeOut(source, animation, true, transition);
+            }
             Snap(source.Shown, source.Shown.Target, transition);
 
             // Flying already and not turning back (a detail card opened again from another tile while it is still
@@ -438,7 +458,7 @@ namespace TimboJimbo.UI.Layout
         // effect has played. Turned back part way (shown again as it shrank into it, or hidden as it grew out of it),
         // it goes back from where it is drawn, as its effect turns back. Still following what took over from it in a
         // hand-off, it stops, and fades back in on the change from where its fade has got to.
-        private static void AnchorTo(NodeState state, NodeState anchor, LayoutTransition transition)
+        private static void AnchorTo(NodeState state, NodeState anchor, MotionTransition transition)
         {
             if (state.Follows != null)
             {
@@ -468,7 +488,7 @@ namespace TimboJimbo.UI.Layout
 
         // Sets a spring off from `value` at `velocity` to where it goes, as Retarget sets any off for the change. There
         // already, it is at rest there, and carries no velocity on.
-        private static void SetOffFrom(NodeState state, Spring spring, Vector2 value, Vector2 velocity, LayoutTransition transition)
+        private static void SetOffFrom(NodeState state, Spring spring, Vector2 value, Vector2 velocity, MotionTransition transition)
         {
             spring.Value = value;
             spring.Velocity = velocity;
@@ -477,20 +497,12 @@ namespace TimboJimbo.UI.Layout
                 spring.Velocity = Vector2.zero;
         }
 
-        // Puts a spring at `value` at once, at rest. What `transition` itself set it moving for has only been replaced by
-        // its own takeover, so that change is not cut short by it; what another change set it moving for is let go of on
-        // its way.
-        private static void Snap(Spring spring, Vector2 value, LayoutTransition transition)
-        {
-            spring.Target = value;
-            Stop(spring, spring.Transition == transition);
-        }
-
-        // The source fades out, from where it is, on the destination's spring without bouncing, once the destination is
-        // well on its way in: after the destination's delay and half its duration, when it is about 82% faded in, so the
-        // two together cover the rect throughout (never less than about 97.6%). On an animation with no duration, it goes
-        // as the destination comes: at once, or once the delay is up.
-        private static void FadeUnder(NodeState source, LayoutAnimation animation, LayoutTransition transition)
+        // The source fades out, from where it is, on the destination's spring without bouncing. Beneath the destination
+        // (`under`), it waits until that is well on its way in: after the destination's delay and half its duration, when
+        // it is about 82% faded in, so the two together cover the rect throughout (never less than about 97.6%). Above it
+        // (turned back with the destination beneath), it goes after the delay alone, the destination already in beneath
+        // it. On an animation with no duration, it goes as the destination comes: at once, or once the delay is up.
+        private static void FadeOut(NodeState source, MotionAnimation animation, bool under, MotionTransition transition)
         {
             var fade = source.Opacity;
             fade.Target = Vector2.zero;
@@ -502,9 +514,13 @@ namespace TimboJimbo.UI.Layout
             }
             Spring.Parameters(animation, out fade.Omega, out _);
             fade.Zeta = 1f;
-            fade.Delay = Mathf.Max(0f, animation.Delay) + Mathf.Max(0f, animation.Duration) * 0.5f;
+            fade.Delay = Mathf.Max(0f, animation.Delay) + (under ? Mathf.Max(0f, animation.Duration) * 0.5f : 0f);
             Hold(fade, transition);
         }
+
+        // Whether `a` is drawn beneath `b` in the flight layer, both flying.
+        private static bool Beneath(NodeState a, NodeState b) =>
+            a.Flight != null && b.Flight != null && s_flights.IndexOf(a) < s_flights.IndexOf(b);
 
         // How fast a node's centre is drawn moving on screen, in world units a second: its velocity within its parent
         // (its slide's included), less its parent's scroll's, turned into world units by the parent, and so on up its
@@ -875,7 +891,7 @@ namespace TimboJimbo.UI.Layout
         // the row it flew home to). Its opacity, which Place sends to nothing while it follows, goes back to its own on
         // the change from wherever its fade had got to; at once outside one, or when it was not drawn. The node it
         // followed carries on by itself, and lands once it has come to rest.
-        private static void ShowAgain(NodeState state, LayoutTransition transition)
+        private static void ShowAgain(NodeState state, MotionTransition transition)
         {
             state.Follows = null;
             var opacity = new Vector2(OpacityTargetOf(state), 0f);

@@ -38,20 +38,22 @@ A node floating against the root sits inside the safe area. The Game view's safe
 
 ## Motion
 
-A change made inside `LayoutSystem.Animate` moves everything it gives somewhere new on springs, as SwiftUI's `withAnimation`; any other change goes there at once.
+Layout moves on the springs of [Motion](https://github.com/Timbo-Jimbo/Motion). A change made inside `MotionSystem.Animate` moves everything it gives somewhere new on springs, as SwiftUI's `withAnimation`; any other change goes there at once.
 
 ```csharp
-LayoutSystem.Animate(() =>
+var snappy = MotionAnimation.Default.Use(MotionAnimationPreset.Snappy);
+MotionSystem.Animate(snappy, () =>
 {
     panel.Width = Sizing.Fixed(480f);
     badge.Display = DisplayMode.Visible;
 }).Finished += () => Debug.Log("landed");
 ```
 
-- Each node moves on its own `Animation`: a duration, a bounce, a delay and a curvature that bows its path out. A duration of 0 (the None preset) doesn't animate: the node is there at once, after its delay.
+- The change carries its animation: a duration, a bounce, a delay and a curvature that bows a node's path out (`MotionAnimation.Default` when it is given none). A duration of 0 (the None preset) doesn't animate: what moves is there at once, after its delay.
+- A node's `Animation` overrides it for the node and everything inside it, as SwiftUI's `.transaction`: a device that turns at once (None) around an app that springs (its own). Left on Inherit, a node moves on the nearest one above it, or else on the change's. `LayoutSystem.AnimationOf(node)` says which.
 - Nodes turn from where they are when a change interrupts them. `Fling` throws a node with a velocity, `Catch` stops it where it is drawn, and `Velocity` reads how fast it is moving.
-- The returned `LayoutTransition` reports `Finished` and `Completed`, can be `Skip`ped, and carries the type names you gave it. `Animate(update, interactive: false)` lets the pointer through what it moves until it lands.
-- Values you draw yourself (a colour, a corner radius) can move with a change too: `LayoutSystem.AnimateValue` springs one from where it is drawn, the change waiting for it as it waits for its nodes. `LayoutSystem.Current` is the change being made, while `Animate`'s update runs.
+- The returned `MotionTransition` reports `Finished` and `Completed`, can be `Skip`ped, and carries the type names you gave it. `Animate(update, interactive: false)` lets the pointer through what it moves until it lands.
+- Values you draw yourself (a colour, a corner radius) can move with a change too, with Motion's `AnimateValue`.
 
 ## Show and hide
 
@@ -64,7 +66,7 @@ Nodes with the same `MatchName` (and `MatchId`, set in code and inherited from a
 - One shown as another is hidden **takes over** from where that one is drawn and flies to its own place, the two cross-fading: a cell zooming into the page it opens.
 - One shown or hidden next to one that **stays shown grows out of it** and shrinks back into it: a dropdown's list out of its button.
 
-`MatchFit` says how a matched node fills the rect it moves through, as CSS's `object-fit`. `MatchWidth`, the default as on the web, keeps it at its own size and scales it, as a picture of itself, evenly to that rect's width; `Fill`, `Contain` and `Cover` scale it to the rect exactly, to fit inside it or to cover it; `Resize` changes the rect's size instead, its content laid out at its own size. `MatchClip` cuts both halves to that rect while they fly. The node taking over decides for the pair.
+`MatchFit` says how a matched node fills the rect it moves through, as CSS's `object-fit`. `MatchWidth`, the default as on the web, keeps it at its own size and scales it, as a picture of itself, evenly to that rect's width; `Fill`, `Contain` and `Cover` scale it to the rect exactly, to fit inside it or to cover it; `Resize` changes the rect's size instead, its content laid out at its own size. `MatchClip` cuts both halves to that rect while they fly. The node taking over decides for the pair: its fit, its clip, and the animation both halves move on, so an `Animation` given to one end plays the way a pair is taken over to it.
 
 Pairs and nodes moved to a new parent inside `Animate` fly above everything, out of every clip, until they land.
 

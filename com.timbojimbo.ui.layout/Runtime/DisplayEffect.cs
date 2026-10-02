@@ -1,12 +1,14 @@
 using System;
+using TimboJimbo.Motion;
 using UnityEngine;
 
 namespace TimboJimbo.UI.Layout
 {
     /// <summary>
     /// How a node appears and disappears when its <see cref="LayoutNode.Display"/> changes inside
-    /// <see cref="LayoutSystem.Animate"/>, as SwiftUI's transition: fading, shrinking, and sliding past an edge of its
-    /// parent, together. It plays on the node's own <see cref="LayoutNode.Animation"/>, the same both ways, and only on
+    /// <see cref="MotionSystem.Animate(MotionAnimation, Action, string[])"/>, as SwiftUI's transition: fading, shrinking,
+    /// and sliding past an edge of its parent, together. It plays on the node's animation for the change (its own
+    /// <see cref="LayoutNode.Animation"/>, one it inherits, or the change's), the same both ways, and only on
     /// the topmost node that changes: what is inside it rides along. Each part is off at its default, so
     /// <c>default(DisplayEffect)</c> plays nothing and <c>new DisplayEffect { Edge = DisplayEdge.Right }</c> is a plain
     /// slide.

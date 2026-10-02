@@ -1,4 +1,5 @@
 using System;
+using TimboJimbo.Motion;
 using UnityEngine;
 
 namespace TimboJimbo.UI.Layout
@@ -11,7 +12,7 @@ namespace TimboJimbo.UI.Layout
     /// The layout system owns every other node's RectTransform (anchors, pivot, position, size and scale): change
     /// where a node goes through its layout, and how it is drawn apart from that, taking no space, by
     /// <see cref="Offset"/>, <see cref="Scale"/> and <see cref="Opacity"/>. A change made in
-    /// <see cref="LayoutSystem.Animate"/> moves the nodes it gives somewhere new on springs, from where they are and at
+    /// <see cref="MotionSystem.Animate(MotionAnimation, Action, string[])"/> moves the nodes it gives somewhere new on springs, from where they are and at
     /// the velocity they have, and plays the <see cref="DisplayEffect"/> of those it shows or hides; any other change
     /// puts them there at once.
     /// </summary>
@@ -69,13 +70,13 @@ namespace TimboJimbo.UI.Layout
         [Tooltip("How opaque it is drawn, 0 to 1, multiplying its fade: visual only. At 0 it takes no pointer, nor does anything inside it.")]
         [SerializeField, Range(0f, 1f)] private float _opacity = 1f;
 
-        [Tooltip("How it moves when a change made in LayoutSystem.Animate gives it somewhere new to be.")]
-        [SerializeField] private LayoutAnimation _animation = LayoutAnimation.Default;
+        [Tooltip("How it, and what is inside it, moves when a change made in MotionSystem.Animate gives it somewhere new to be. Inherit: on the Animation of the nearest node above it with one, or else on the change's.")]
+        [SerializeField] private OptionalMotionAnimation _animation = new(null);
 
-        [Tooltip("How it appears and disappears when its Display changes inside LayoutSystem.Animate, on its Animation, the same both ways. Only the topmost node that changes plays it; what is inside rides along.")]
+        [Tooltip("How it appears and disappears when its Display changes inside MotionSystem.Animate, on its animation for the change, the same both ways. Only the topmost node that changes plays it; what is inside rides along.")]
         [SerializeField] private DisplayEffect _displayEffect = DisplayEffect.Default;
 
-        [Tooltip("Its name for matching: inside LayoutSystem.Animate, a node shown with the same name (and id) as one hidden takes over from where that one is drawn; shown or hidden with one that stays shown, it grows out of that one or shrinks back into it. Empty: not matched.")]
+        [Tooltip("Its name for matching: inside MotionSystem.Animate, a node shown with the same name (and id) as one hidden takes over from where that one is drawn; shown or hidden with one that stays shown, it grows out of that one or shrinks back into it. Empty: not matched.")]
         [SerializeField] private string _matchName;
 
         // Code only, and never saved: an id is usually an object of the game's (an author, an item).
@@ -148,7 +149,7 @@ namespace TimboJimbo.UI.Layout
         /// long as fit: each child is sized in its cell by its own sizing (grow fills it). A line is as tall as its
         /// tallest child, which ChildAlignY places it in; the lines as a block are placed by it too. Lines and Adaptive
         /// wrap left to right only; nothing wraps along the way it scrolls. Changed inside
-        /// <see cref="LayoutSystem.Animate"/> (a new count, a new width), the children fly to their new places.
+        /// <see cref="MotionSystem.Animate(MotionAnimation, Action, string[])"/> (a new count, a new width), the children fly to their new places.
         /// </summary>
         public Wrap Wrap { get => _wrap; set { _wrap = value; Changed(); } }
 
@@ -163,14 +164,14 @@ namespace TimboJimbo.UI.Layout
 
         /// <summary>
         /// Floats it out of its parent's flow, placed against its parent, its root or another node in its tree
-        /// (<see cref="Floating.Element"/>). Changed inside <see cref="LayoutSystem.Animate"/> (a new element, say), it
+        /// (<see cref="Floating.Element"/>). Changed inside <see cref="MotionSystem.Animate(MotionAnimation, Action, string[])"/> (a new element, say), it
         /// springs there from where it is drawn.
         /// </summary>
         public Floating Floating { get => _floating; set { _floating = value; Changed(); } }
 
         /// <summary>
         /// Whether it is shown. Hidden keeps its space; None leaves layout, its siblings closing up at once. Changed
-        /// inside <see cref="LayoutSystem.Animate"/>, it plays its <see cref="DisplayEffect"/> on its
+        /// inside <see cref="MotionSystem.Animate(MotionAnimation, Action, string[])"/>, it plays its <see cref="DisplayEffect"/> on its
         /// <see cref="Animation"/>, in from its away pose or out to it, and a node it hides is drawn, taking no
         /// pointer, until it has gone (the change finishes then). What is inside it rides along. Changed outside
         /// Animate, it shows or goes at once.
@@ -182,8 +183,9 @@ namespace TimboJimbo.UI.Layout
 
         /// <summary>
         /// How much bigger it is drawn around its centre (1: as laid out), taking no space: for a press or a drag.
-        /// Changed in <see cref="LayoutSystem.Animate"/> it springs there on its <see cref="Animation"/>; otherwise at
-        /// once (a drag setting it should catch the node first, <see cref="Catch"/>). Multiplies its
+        /// Changed in <see cref="MotionSystem.Animate(MotionAnimation, Action, string[])"/> it springs there on its
+        /// animation for the change (<see cref="Animation"/>); otherwise at once (a drag setting it should catch the
+        /// node first, <see cref="Catch"/>). Multiplies its
         /// <see cref="DisplayEffect"/>'s shrink. Nodes attached to it follow where it is laid out, not its scale. A
         /// root is not scaled.
         /// </summary>
@@ -191,17 +193,26 @@ namespace TimboJimbo.UI.Layout
 
         /// <summary>
         /// How opaque it is drawn (0 to 1), multiplying its fade: visual only. Changed in
-        /// <see cref="LayoutSystem.Animate"/> it moves there on its <see cref="Animation"/>'s duration without
-        /// bouncing; otherwise at once. At 0 it takes no pointer, nor does anything inside it.
+        /// <see cref="MotionSystem.Animate(MotionAnimation, Action, string[])"/> it moves there on its animation's
+        /// duration (<see cref="Animation"/>) without bouncing; otherwise at once. At 0 it takes no pointer, nor does anything inside it.
         /// </summary>
         public float Opacity { get => _opacity; set { _opacity = Mathf.Clamp01(value); Changed(); } }
 
-        /// <summary>How it moves when a change made in <see cref="LayoutSystem.Animate"/> gives it somewhere new to be.</summary>
-        public LayoutAnimation Animation { get => _animation; set { _animation = value; Changed(); } }
+        /// <summary>
+        /// How it moves when a change made in <see cref="MotionSystem.Animate(MotionAnimation, Action, string[])"/>
+        /// gives it somewhere new to be, and what is inside it with no Animation of its own, as SwiftUI's transaction
+        /// modifier: null (the default) inherits, moving it on the Animation of the nearest node above it with one, or
+        /// else on the change's (<see cref="MotionTransition.Animation"/>). It covers all it does for a change: its
+        /// place, size, scale and opacity, its <see cref="DisplayEffect"/>, its scroll, and a pair it takes over by
+        /// <see cref="MatchName"/> (the node taking over decides for both: its source fades out on it too). A fling sets
+        /// off on it, or on the default. <see cref="LayoutSystem.AnimationOf"/> says what it moves on in a change.
+        /// </summary>
+        public MotionAnimation? Animation { get => _animation.Value; set { _animation = new OptionalMotionAnimation(value); Changed(); } }
 
         /// <summary>
         /// How it appears and disappears when its <see cref="Display"/> changes inside
-        /// <see cref="LayoutSystem.Animate"/>, on its own <see cref="Animation"/>, the same both ways: fading,
+        /// <see cref="MotionSystem.Animate(MotionAnimation, Action, string[])"/>, on its animation for the change
+        /// (<see cref="Animation"/>), the same both ways: fading,
         /// shrinking, and sliding just past an edge of its parent's rect as drawn (the screen, for one floating against
         /// its root). A slide hides it only where something clips at that edge: a node between it and the clip (a
         /// padded wrapper) keeps it in view. Only the topmost node that changes plays it; what is inside rides along. A
@@ -211,7 +222,7 @@ namespace TimboJimbo.UI.Layout
         public DisplayEffect DisplayEffect { get => _displayEffect; set { _displayEffect = value; Changed(); } }
 
         /// <summary>
-        /// Its name for matching. Inside <see cref="LayoutSystem.Animate"/>, when a node with this name and matching id
+        /// Its name for matching. Inside <see cref="MotionSystem.Animate(MotionAnimation, Action, string[])"/>, when a node with this name and matching id
         /// (<see cref="MatchId"/>) starts being shown and another that had them is hidden, the shown one takes over from
         /// where the other is drawn, flying above everything until it lands (a cell zooming into the page it opens).
         /// When the other stays shown, it does not move: the one shown or hidden grows out of it or shrinks back into it,
@@ -265,7 +276,7 @@ namespace TimboJimbo.UI.Layout
         /// offset stays as it is as its range grows. End: it starts at its end (at once, the first time it is laid out)
         /// and, while it is there (at rest within half a unit of it, or springing to it), stays there as its range grows,
         /// on each axis it scrolls, as a chat's messages do: on its spring for the change inside
-        /// <see cref="LayoutSystem.Animate"/>, and otherwise at once (or, springing there already, on that spring).
+        /// <see cref="MotionSystem.Animate(MotionAnimation, Action, string[])"/>, and otherwise at once (or, springing there already, on that spring).
         /// Scrolled away from its end it stays where it is, and one held by a press or carried by a flick is left to it.
         /// A <see cref="ScrollTo"/> or <see cref="ScrollOffset"/> in the same change wins, as does a
         /// <see cref="ScrollIntoView"/> that moves it. Only play mode scrolls.
@@ -298,7 +309,7 @@ namespace TimboJimbo.UI.Layout
         /// <summary>
         /// How far its children are scrolled, x right and y down, from 0 (the start) to <see cref="ScrollRange"/>, as
         /// UIScrollView's contentOffset. Set, it scrolls there, kept within range: at once, or inside
-        /// <see cref="LayoutSystem.Animate"/> on its spring, from where it is and at the speed it is scrolling.
+        /// <see cref="MotionSystem.Animate(MotionAnimation, Action, string[])"/> on its spring, from where it is and at the speed it is scrolling.
         /// </summary>
         public Vector2 ScrollOffset { get => LayoutSystem.ScrollOffsetOf(this); set => LayoutSystem.SetScrollOffset(this, value); }
 
@@ -314,7 +325,7 @@ namespace TimboJimbo.UI.Layout
         /// <summary>
         /// Scrolls so that <paramref name="descendant"/> (anything inside it) sits <paramref name="anchor"/> of the way
         /// down (or across) what it shows: 0 at the start, 0.5 in the middle, 1 at the end, kept within range. At once,
-        /// or inside <see cref="LayoutSystem.Animate"/> on its spring, from where it is and at the speed it is
+        /// or inside <see cref="MotionSystem.Animate(MotionAnimation, Action, string[])"/> on its spring, from where it is and at the speed it is
         /// scrolling, as SwiftUI's scrollTo. What is lined up is the descendant with the space around it, as CSS's
         /// scroll-margin, worked out from the layout: on a side with a neighbour in its parent's flow, the gap between
         /// them (so no sliver of the neighbour shows); on a side where it is first or last in that flow, or across it, its
@@ -329,7 +340,7 @@ namespace TimboJimbo.UI.Layout
         /// that <see cref="ScrollTo"/> lines up, wholly into view, to whichever end of what it shows is nearer; not at all
         /// when it is in view already. For one bigger than what it shows, it moves the least that fills the view with it;
         /// one that fills the view already is left where it is. As UIKit's scrollRectToVisible and CSS's scrollIntoView
-        /// with 'nearest'. At once, or inside <see cref="LayoutSystem.Animate"/> on its spring, as ScrollTo.
+        /// with 'nearest'. At once, or inside <see cref="MotionSystem.Animate(MotionAnimation, Action, string[])"/> on its spring, as ScrollTo.
         /// </summary>
         public void ScrollIntoView(LayoutNode descendant) => LayoutSystem.ScrollIntoView(this, descendant);
 
@@ -386,7 +397,7 @@ namespace TimboJimbo.UI.Layout
         /// is given something new for that one alone: layout a new size, or a new <see cref="Scale"/>, so a drag
         /// setting its Scale leaves its opacity where it stopped. A drag then moves its Offset, and letting go flings
         /// it. A change it was moving for is let go of on its way, so it does not complete
-        /// (<see cref="LayoutTransition.Completed"/>), and it takes the pointer again if that change had taken it away.
+        /// (<see cref="MotionTransition.Completed"/>), and it takes the pointer again if that change had taken it away.
         /// A matched node flying to take over from another (<see cref="MatchName"/>), or with one inside it, lands at
         /// once first. Returns whether it was moving; false, and nothing is stopped, for a node on its way out (hidden
         /// inside Animate) or one following the node that took over from it.

@@ -1,3 +1,4 @@
+using TimboJimbo.Motion;
 using UnityEngine;
 using UnityEngine.EventSystems;
 using UnityEngine.UI;
@@ -128,7 +129,7 @@ namespace TimboJimbo.UI.Layout
         public Vector2 RequestOffset;
         public LayoutNode RequestTarget;
         public float RequestAnchor;
-        public LayoutTransition RequestTransition;
+        public MotionTransition RequestTransition;
 
         // The offset Scrolled was last raised with, and whether it is queued to be raised again.
         public Vector2 Raised;

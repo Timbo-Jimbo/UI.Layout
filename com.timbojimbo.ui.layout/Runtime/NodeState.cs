@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using TimboJimbo.Motion;
 using UnityEngine;
 using UnityEngine.UI;
 
@@ -191,6 +192,10 @@ namespace TimboJimbo.UI.Layout
         // where it is drawn, or it from where that one is.
         public string PassName;
         public object PassId;
+
+        // Its Animation this pass, or else the nearest one above it (on through Above, for a root); null when nothing
+        // down to it has one, when it moves on the change's (LayoutSystem.AnimationOf).
+        public MotionAnimation? PassAnimation;
 
         // PassShown, PassName and PassId as the pass before found them: in Animate's pass, as they were before the
         // change, so it can tell what the change started and stopped showing under each name.

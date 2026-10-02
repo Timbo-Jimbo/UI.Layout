@@ -1,4 +1,5 @@
 using System.Collections.Generic;
+using TimboJimbo.Motion;
 using UnityEngine;
 using UnityEngine.UI;
 
@@ -279,7 +280,7 @@ namespace TimboJimbo.UI.Layout
         // following and leaves (ShowAgain). One shrinking back into its anchor stays too, until its effect has played. A
         // destination that drops out ends its pair first, and what followed it drops out in turn if it is not shown
         // either, so the layer is looked through again.
-        private static void DropOut(LayoutTransition transition)
+        private static void DropOut(MotionTransition transition)
         {
             for (int i = s_flights.Count - 1; i >= 0; i--)
             {

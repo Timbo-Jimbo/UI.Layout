@@ -1,25 +1,31 @@
 using System;
 using System.Collections.Generic;
+using TimboJimbo.Motion;
 using UnityEngine;
 using UnityEngine.EventSystems;
 using UnityEngine.UI;
+using static TimboJimbo.Motion.MotionSystem;
 
 namespace TimboJimbo.UI.Layout
 {
     /// <summary>
     /// Lays out every <see cref="LayoutNode"/> each frame and moves them to where they go. A change made in
-    /// <see cref="Animate"/> moves the nodes it gives somewhere new on springs, from where they are drawn and at the
-    /// velocity they have; any other change puts them there at once. A node that scrolls moves its children together by
-    /// its scroll offset, which drags, flicks, the wheel and ScrollTo drive.
+    /// <see cref="MotionSystem.Animate(MotionAnimation, Action, string[])"/> moves the nodes it gives somewhere new on
+    /// springs, from where they are drawn and at the velocity they have, on the change's animation or a node's own
+    /// (<see cref="LayoutNode.Animation"/>, which covers what is inside it); any other change puts them there at once. A
+    /// node that scrolls moves its children together by its scroll offset, which drags, flicks, the wheel and ScrollTo
+    /// drive.
     /// </summary>
     public static partial class LayoutSystem
     {
-        // Once a frame, just before canvases are drawn (play mode and edit mode alike), every tree is laid out from
-        // its root: the solver says where each node goes, which becomes its targets; the springs of what is moving are
-        // stepped; and where each node is drawn is written into its RectTransform and CanvasGroup. Outside Animate a
-        // target that changes is taken up at once, so a drag moving a node's Offset follows the pointer exactly;
-        // Animate lays out before and after its update, and what the update changed sets off on springs. In edit mode
-        // nothing animates.
+        // Once a frame, just before canvases are drawn (play mode and edit mode alike), Motion's frame (MotionSystem)
+        // has every tree laid out from its root: the solver says where each node goes, which becomes its targets; the
+        // springs of what is moving are stepped; and where each node is drawn is written into its RectTransform and
+        // CanvasGroup. Outside Animate a target that changes is taken up at once, so a drag moving a node's Offset
+        // follows the pointer exactly; Animate has the system lay out before and after its update, and what the update
+        // changed sets off on springs, held by the change (the Driver below). A node moves on its own Animation, or on
+        // that of the nearest node above it with one (PassAnimation, handed down as a pass visits), or else on the
+        // change's (AnimationOf). In edit mode nothing animates.
         //
         // An outermost root keeps its content clear of the screen's safe area on the edges its SafeArea names, read
         // each pass: the solver adds the part of the unsafe area it covers to its padding. A node ignoring the safe area
@@ -90,10 +96,6 @@ namespace TimboJimbo.UI.Layout
         // Every enabled node, and what is kept for it.
         private static readonly Dictionary<LayoutNode, NodeState> s_states = new();
 
-        // Transitions that everything they set moving has let go of, finished once the pass under way is over: a
-        // Finished handler may start another change.
-        private static readonly List<LayoutTransition> s_finishing = new();
-
         // Scroll containers whose offset has changed since Scrolled was last raised for them, raised once the frame is
         // drawn (a handler may scroll or lay out something else).
         private static readonly List<NodeState> s_scrolled = new();
@@ -118,23 +120,16 @@ namespace TimboJimbo.UI.Layout
         private static int s_count;
         private static readonly Vector3[] s_corners = new Vector3[4];
 
-        // The transition whose update is running, which an Animate inside it joins.
-        private static LayoutTransition s_current;
         // A pass is under way (a canvas update forced from inside one must not start another).
         private static bool s_passing;
+        // Whether the system is Motion's driver yet.
         private static bool s_hooked;
-        // The frame the springs were last stepped in: once a frame, however often canvases update.
-        private static int s_steppedFrame = -1;
 
         // Statics survive play mode sessions when domain reload is off.
         [RuntimeInitializeOnLoadMethod(RuntimeInitializeLoadType.SubsystemRegistration)]
         private static void ResetStatics()
         {
-            s_current = null;
             s_passing = false;
-            s_steppedFrame = -1;
-            s_finishing.Clear();
-            s_values.Clear();
             foreach (var state in s_scrolled)
                 state.Scroll.Queued = false;
             s_scrolled.Clear();
@@ -162,8 +157,8 @@ namespace TimboJimbo.UI.Layout
             Array.Clear(s_solver, 0, s_solver.Length);
             Array.Clear(s_solved, 0, s_solved.Length);
             // Nodes register and unregister themselves as they are enabled and disabled, so the set keeps itself; any
-            // an earlier session left behind that are gone are dropped. The canvas hook lasts as long as the statics
-            // do, so it stays.
+            // an earlier session left behind that are gone are dropped. Motion keeps its drivers as long as the statics
+            // last, so the system stays one.
             var gone = new List<LayoutNode>();
             foreach (var node in s_states.Keys)
             {
@@ -174,91 +169,87 @@ namespace TimboJimbo.UI.Layout
                 s_states.Remove(node);
         }
 
-        /// <summary>
-        /// Makes the change <paramref name="update"/> makes, and moves every node it gives somewhere new (a new place,
-        /// size, or Display) on its own <see cref="LayoutNode.Animation"/>'s spring, from where it is drawn and at the
-        /// velocity it has, as SwiftUI's withAnimation. Nodes already moving that it leaves alone carry on; those it
-        /// changes turn from where they are. A node it shows or hides plays its <see cref="LayoutNode.DisplayEffect"/>,
-        /// and one it hides is drawn until it has gone: the change finishes (<see cref="LayoutTransition.Finished"/>)
-        /// only once everything it hid has, so that is when it is safe to destroy them. A node it moves to another
-        /// parent flies there above everything in its root canvas, cut by neither the clip it leaves nor the one it goes
-        /// into, until it lands. A node it shows with the <see cref="LayoutNode.MatchName"/> and
-        /// <see cref="LayoutNode.MatchId"/> of one it hides takes over from where that one is drawn, flying above
-        /// everything as the two cross-fade, until it lands; one it shows or hides with those of one that stays shown
-        /// grows out of that one or shrinks back into it. <paramref name="types"/> say what kind of change it is. Called
-        /// inside another's update, the change is part of that one. What it moves takes the pointer on its way (see
-        /// <see cref="Animate(Action, bool, string[])"/> for a change that does not).
-        /// </summary>
-        public static LayoutTransition Animate(Action update, params string[] types) => Animate(update, true, types);
+        // ── Motion ───────────────────────────────────────────────────────────────
 
         /// <summary>
-        /// The change being made, while <see cref="Animate(Action, string[])"/>'s update runs; null otherwise. What draws
-        /// values of its own reads it to move them with the change (<see cref="AnimateValue"/>).
+        /// The animation <paramref name="node"/> moves on in the change being made (<see cref="MotionSystem.Current"/>):
+        /// its own <see cref="LayoutNode.Animation"/>, or else that of the nearest node above it with one, or else the
+        /// change's (<see cref="MotionAnimation.Default"/> outside one). For moving something drawn in the node with it
+        /// (<see cref="MotionSystem.AnimateValue"/>), so it keeps time with the node.
         /// </summary>
-        public static LayoutTransition Current => s_current;
-
-        /// <summary>
-        /// Makes the change <paramref name="update"/> makes and animates it, as <see cref="Animate(Action, string[])"/>.
-        /// With <paramref name="interactive"/> false, every node it moves takes no pointer while it moves for it, and
-        /// nor does anything inside it (its CanvasGroup stops blocking raycasts), so the pointer goes to whatever is
-        /// under it; it takes the pointer again once it comes to rest, is taken over by an interactive change, or is
-        /// caught. UIKit's UIView.animate without .allowUserInteraction: a card closing cannot be pressed again on its
-        /// way. Called inside another's update, the change is part of that one, and interactive as that one is.
-        /// </summary>
-        public static LayoutTransition Animate(Action update, bool interactive, params string[] types)
+        public static MotionAnimation AnimationOf(LayoutNode node)
         {
-            if (update == null) throw new ArgumentNullException(nameof(update));
-
-            // Inside another's update, the change is part of that one.
-            if (s_current != null)
+            if (node != null)
             {
-                update();
-                return s_current;
+                if (node.Animation is { } own) return own;
+                // Up the enabled nodes above it, its layout parents and on through the node above each root, as a pass
+                // hands PassAnimation down.
+                for (var parent = node.transform.parent; parent != null; parent = parent.parent)
+                {
+                    if (parent.TryGetComponent(out LayoutNode above) && above.isActiveAndEnabled && above.Animation is { } animation)
+                        return animation;
+                }
+            }
+            return Current?.Animation ?? MotionAnimation.Default;
+        }
+
+        // The animation a node moves on for `transition` (null for none, as a fling): its own, or that of the nearest node
+        // above it with one, as the pass found them (PassAnimation), or else the change's, or else the default.
+        private static MotionAnimation AnimationOf(NodeState state, MotionTransition transition) =>
+            state.PassAnimation ?? transition?.Animation ?? MotionAnimation.Default;
+
+        // The system's part in Motion's changes and frame (MotionSystem.Animate, and Motion's frame just before canvases
+        // are drawn). Before a change's update it lays out, so what changed before goes where it goes at once and only
+        // what the update changes animates; once the update has run it lays out again, what changed setting off on
+        // springs held by the change. Each frame it lays out, steps and draws every node; and it puts what a skipped
+        // change moves where it is going.
+        private sealed class Driver : IMotionDriver
+        {
+            public static readonly Driver Instance = new();
+
+            public bool Busy => s_passing;
+
+            public void BeforeChange() => Pass(null);
+
+            public void AfterChange(MotionTransition transition)
+            {
+                Pass(transition);
+
+                // What the change started and stopped showing under one name pairs up, before anything boards: a pair
+                // boards with the change's other flights, and a node made a follower here is then not dropped out below
+                // for being hidden.
+                MatchPairs(transition);
+
+                // What the change moved to another parent flies, a flight it hid drops out, and a follower it showed
+                // again without a new pair stops following, coming back with the change.
+                Embark();
+                DropOut(transition);
             }
 
-            var transition = new LayoutTransition(types, interactive);
-
-            // Outside play mode nothing animates: the change goes where it goes at once, as any other does.
-            if (!Application.isPlaying)
+            // A drag whose LayoutScroller went hears nothing more from UGUI: it lets go before the frame is laid out.
+            public void BeginFrame(bool playing)
             {
-                update();
-                transition.Finish();
-                return transition;
+                if (playing)
+                    EndLostDrags();
             }
 
-            // What changed before it goes where it goes at once, so only what the update changes animates.
-            Pass(null);
-            s_current = transition;
-            try
+            public void Frame(bool playing, bool step, float dt) => LayoutSystem.Frame(playing, step, dt);
+
+            // A glide that ran into an end with something above it to take its speed hands it on now the frame is laid
+            // out (an owner's code may start a change); what moved is then laid out and drawn this frame too.
+            public bool HandOn() => LayoutSystem.HandOn();
+
+            // ShownChanged and then Scrolled come last, with how each node is drawn this frame. What their handlers do to
+            // graphics, or to transforms that are not nodes, is drawn this frame, canvases not being drawn yet; what they
+            // change in layout (a label showing the offset) is laid out with the next frame: these move every frame, and
+            // laying everything out twice for each of those is not worth one frame sooner.
+            public void EndFrame()
             {
-                update();
+                RaiseShownChanged();
+                RaiseScrolled();
             }
-            catch
-            {
-                // What it changed before it threw goes where it goes at once in the next frame, as any other change;
-                // the transition moved nothing, and finishes then.
-                s_current = null;
-                s_finishing.Add(transition);
-                throw;
-            }
-            s_current = null;
-            Pass(transition);
 
-            // What the change started and stopped showing under one name pairs up, before anything boards: a pair
-            // boards with the change's other flights, and a node made a follower here is then not dropped out below for
-            // being hidden.
-            MatchPairs(transition);
-
-            // What the change moved to another parent flies, a flight it hid drops out, and a follower it showed again
-            // without a new pair stops following, coming back with the change.
-            Embark();
-            DropOut(transition);
-
-            // Nothing moved: it is over already (a Finished handler added later still runs, at once).
-            if (transition.Moving == 0)
-                transition.Finish();
-            Flush();
-            return transition;
+            public void Skip(MotionTransition transition) => SkipNodes(transition);
         }
 
         // UIScrollView's rubber band coefficient: how much of a pull past an end is drawn at first, before the band
@@ -292,7 +283,7 @@ namespace TimboJimbo.UI.Layout
             return Mathf.Sign(stretched) * (limit / RubberBandCoefficient * over / (limit - over));
         }
 
-        // ── For LayoutNode and LayoutTransition ──────────────────────────────────
+        // ── For LayoutNode ───────────────────────────────────────────────────────
 
         internal static void Register(LayoutNode node)
         {
@@ -302,12 +293,12 @@ namespace TimboJimbo.UI.Layout
             Changed(node);
         }
 
-        // The frame runs from the first node registered, or the first value animated, on.
+        // From the first node registered on, the system lays out in Motion's frame and takes part in its changes.
         private static void Hook()
         {
             if (s_hooked) return;
             s_hooked = true;
-            Canvas.preWillRenderCanvases += Tick;
+            AddDriver(Driver.Instance);
         }
 
         // Disabled or destroyed, a node is not drawn, so nothing waits for it: it lets go of the transitions it was
@@ -366,7 +357,7 @@ namespace TimboJimbo.UI.Layout
         {
             // Changed inside Animate, a caught node is let go of: the change moves it on from where it was stopped (a
             // drag letting go puts its Offset back, and whatever else it held sets off again with it).
-            if (s_current != null && s_states.TryGetValue(node, out var state))
+            if (Current != null && s_states.TryGetValue(node, out var state))
                 LetGoOfHolds(state);
 #if UNITY_EDITOR
             // In play mode the next frame lays it out anyway. In edit mode the player loop, and with it the canvas
@@ -402,8 +393,9 @@ namespace TimboJimbo.UI.Layout
             return space != null ? Vector2.Scale(state.Size.Velocity, UnitOf(space)) : Vector2.zero;
         }
 
-        // Sets its position moving at `velocity` (world units a second) towards where layout puts it, on its own
-        // spring; not for any transition, and with no sideways kick. Given a `sizeVelocity` (how fast its width and
+        // Sets its position moving at `velocity` (world units a second) towards where layout puts it, on its animation
+        // (its own or one it inherits, the default without either: there is no change); not for any transition, and
+        // with no sideways kick. Given a `sizeVelocity` (how fast its width and
         // height are growing, world units a second), its size is set moving at it in the same way; left at zero, its
         // size is left as it is. An Animate after it sets off at those velocities.
         internal static void Fling(LayoutNode node, Vector3 velocity, Vector2 sizeVelocity)
@@ -413,14 +405,14 @@ namespace TimboJimbo.UI.Layout
             // What moved it since the last pass (a drag's last move, most likely in this same frame) goes where it
             // goes at once first, as the frame's own pass would, rather than stopping the fling there. Inside
             // Animate's update, that update's pass takes it up, keeping the velocity.
-            if (s_current == null)
+            if (Current == null)
                 Pass(null);
 
             var space = SpaceOf(state);
             if (space == null) return;
             var spring = state.Position;
             Vector2 local = space.InverseTransformVector(velocity);
-            Spring.Parameters(state.Node.Animation, out spring.Omega, out spring.Zeta);
+            Spring.Parameters(AnimationOf(state, null), out spring.Omega, out spring.Zeta);
             spring.Velocity = new Vector2(local.x, -local.y);
             spring.Delay = 0f;
             Hold(spring, null);
@@ -430,7 +422,7 @@ namespace TimboJimbo.UI.Layout
             {
                 var size = state.Size;
                 var unit = UnitOf(space);
-                Spring.Parameters(state.Node.Animation, out size.Omega, out size.Zeta);
+                Spring.Parameters(AnimationOf(state, null), out size.Omega, out size.Zeta);
                 size.Velocity = new Vector2(unit.x > 0f ? sizeVelocity.x / unit.x : 0f, unit.y > 0f ? sizeVelocity.y / unit.y : 0f);
                 size.Delay = 0f;
                 Hold(size, null);
@@ -542,7 +534,7 @@ namespace TimboJimbo.UI.Layout
         {
             if (!Application.isPlaying || node.Scroll == ScrollAxis.None || !s_states.TryGetValue(node, out var state)) return;
             var scroll = state.Scroll ??= new ScrollState();
-            if (s_current == null && scroll.Measured && scroll.Axis != ScrollAxis.None)
+            if (Current == null && scroll.Measured && scroll.Axis != ScrollAxis.None)
             {
                 ClearRequest(scroll);
                 StopScrollAt(scroll, scroll.Clamp(offset));
@@ -585,7 +577,7 @@ namespace TimboJimbo.UI.Layout
                 return;
             }
             var scroll = state.Scroll ??= new ScrollState();
-            if (s_current == null && scroll.Measured && scroll.Axis != ScrollAxis.None
+            if (Current == null && scroll.Measured && scroll.Axis != ScrollAxis.None
                 && TryScrollRect(state, descendant, out var min, out var max))
             {
                 ClearRequest(scroll);
@@ -599,10 +591,10 @@ namespace TimboJimbo.UI.Layout
             RequestScroll(scroll, kind, Vector2.zero, descendant, anchor);
         }
 
-        // Puts everything the transition is moving where it is going, as if it had got there, and finishes it.
-        internal static void Skip(LayoutTransition transition)
+        // Puts everything the transition is moving on nodes, and the scrolls it is moving, where they are going, as if
+        // they had got there (MotionTransition.Skip).
+        private static void SkipNodes(MotionTransition transition)
         {
-            if (transition == null || transition.IsFinished) return;
             foreach (var state in s_states.Values)
             {
                 StopIfHeld(state.Position, transition);
@@ -614,57 +606,15 @@ namespace TimboJimbo.UI.Layout
                 if (scroll != null && scroll.Offset.Transition == transition)
                     StopScrollAt(scroll, scroll.Offset.Target, arrived: true);
             }
-            SkipValues(transition);
-            transition.Finish();
-        }
-
-        private static void StopIfHeld(Spring spring, LayoutTransition transition)
-        {
-            if (spring.Transition == transition)
-                Stop(spring, arrived: true);
         }
 
         // ── The frame ────────────────────────────────────────────────────────────
 
         // Each tree in turn, outer roots first, is laid out, stepped and drawn before the next is laid out, so a root
-        // inside a node (under a plain object) lays out in that node's rect as drawn this frame.
-        private static void Tick()
-        {
-            // Not while Animate's update is making its change (its own pass takes that up), nor inside a pass: a
-            // canvas update forced from inside either comes back here.
-            if (s_current != null || s_passing) return;
-
-            bool playing = Application.isPlaying;
-            int frame = Time.frameCount;
-            bool step = playing && frame != s_steppedFrame;
-            if (step)
-                s_steppedFrame = frame;
-            // UI keeps its own time: it moves and scrolls in a pause menu (a timeScale of 0) and at the speed it was
-            // dragged at whatever the game's time is doing, as UIKit and ScrollRect do.
-            float dt = Time.unscaledDeltaTime;
-
-            // A drag whose LayoutScroller went hears nothing more from UGUI: it lets go before the frame is laid out.
-            if (playing)
-                EndLostDrags();
-            Frame(playing, step, dt);
-            // A glide that ran into an end with something above it to take its speed hands it on now the frame is laid
-            // out (an owner's code may start a change); and a Finished handler may have shown, made or moved nodes.
-            // Either way what moved is laid out and drawn this frame too, from where it is, rather than drawn once where
-            // it was first. Nothing is stepped again.
-            bool handed = HandOn();
-            if (Flush() || handed)
-            {
-                Frame(playing, false, dt);
-                Flush();
-            }
-            // ShownChanged and then Scrolled come last, with how each node is drawn this frame. What their handlers do
-            // to graphics, or to transforms that are not nodes, is drawn this frame, canvases not being drawn yet; what
-            // they change in layout (a label showing the offset) is laid out with the next frame: these move every
-            // frame, and laying everything out twice for each of those is not worth one frame sooner.
-            RaiseShownChanged();
-            RaiseScrolled();
-        }
-
+        // inside a node (under a plain object) lays out in that node's rect as drawn this frame. Motion's frame runs it
+        // once a frame, and again without stepping when a Finished handler may have shown, made or moved nodes, or a
+        // glide handed its speed on (Driver): what moved is then laid out and drawn this frame too, from where it is,
+        // rather than drawn once where it was first.
         private static void Frame(bool playing, bool step, float dt)
         {
             s_passing = true;
@@ -731,7 +681,6 @@ namespace TimboJimbo.UI.Layout
                 for (int i = 0; i < s_following.Count; i++)
                     Write(s_following[i]);
                 s_following.Clear();
-                StepValues(playing, step, dt);
             }
             finally
             {
@@ -742,7 +691,7 @@ namespace TimboJimbo.UI.Layout
         // Lays out every tree and gives each node its targets: at once without a transition, and with one, what
         // changed sets off on springs held by it, and who holds each name before and after the change is noted for
         // MatchPairs. Nothing is stepped or drawn: the frame does that.
-        private static void Pass(LayoutTransition transition)
+        private static void Pass(MotionTransition transition)
         {
             if (s_passing) return;
             s_passing = true;
@@ -793,7 +742,7 @@ namespace TimboJimbo.UI.Layout
         // its new range and what was asked of it. Last, a flight no longer shown drops out and a follower shown again
         // stops following, bar in a change's own pass, where that waits for the change's pairs to form and its flights to
         // board (Animate).
-        private static void LayOut(NodeState root, LayoutTransition transition)
+        private static void LayOut(NodeState root, MotionTransition transition)
         {
             s_visit.Clear();
             s_count = 0;
@@ -870,12 +819,14 @@ namespace TimboJimbo.UI.Layout
             var node = state.Node;
             state.PassParent = parent;
             // Where it is, and whether it is shown down to here, for the flight layer and names; a root's place follows
-            // the node above it, whose tree is laid out first. Then its name and id, which it holds while shown.
+            // the node above it, whose tree is laid out first. The animation it inherits, handed down the same way. Then
+            // its name and id, which it holds while shown.
             state.WasSibling = state.PassSibling;
             state.PassSibling = sibling;
             var above = parent ?? state.Above;
             state.WasShown = state.PassShown;
             state.PassShown = node.Display == DisplayMode.Visible && (above == null || above.PassShown);
+            state.PassAnimation = node.Animation ?? above?.PassAnimation;
             RecordKey(state, above);
             // Its drag owner, looked up for every node met as its content is, before its scroll is set up: either one
             // wants the LayoutScroller that takes the pointer for it.
@@ -1017,7 +968,7 @@ namespace TimboJimbo.UI.Layout
         // the topmost node that changes plays it, both ways: what is shown inside it in the same change comes with it,
         // and what is hidden inside it, in the same change or while it is leaving, rides it out. Parents come before
         // their children, so what is above it in this pass is known, a change made to it in this pass included.
-        private static void Place(NodeState state, LayoutTransition transition)
+        private static void Place(NodeState state, MotionTransition transition)
         {
             var node = state.Node;
             var parent = state.PassParent;
@@ -1255,7 +1206,7 @@ namespace TimboJimbo.UI.Layout
         // so is its away move, which the pass's UpdateAway then brings up to date for the new parent's rect, handing
         // over what is drawn of the difference. Moved from one parent to another in `transition`'s pass, it boards the
         // flight layer, flying above both parents' clips to its new place; to or from being a root, it does not fly.
-        private static void Reparent(NodeState state, NodeState parent, LayoutTransition transition)
+        private static void Reparent(NodeState state, NodeState parent, MotionTransition transition)
         {
             var old = state.Parent;
             state.Parent = parent;
@@ -1306,7 +1257,7 @@ namespace TimboJimbo.UI.Layout
         // Puts a node that starts being drawn inside a change at its away pose at once (its position and size already
         // where they go): not shown, and faded out if its effect fades. It then sets off from there to shown and to its
         // opacity on the change. What is shown inside it in the same change comes with it.
-        private static void Appear(NodeState state, Vector2 opacity, LayoutTransition transition)
+        private static void Appear(NodeState state, Vector2 opacity, MotionTransition transition)
         {
             PutAt(state.Shown, Vector2.zero);
             PutAt(state.Opacity, state.Node.DisplayEffect.Fade ? Vector2.zero : opacity);
@@ -1317,24 +1268,24 @@ namespace TimboJimbo.UI.Layout
 
         // A node hidden while its position is moving from a fling, on no change, is thrown away: its position is sent
         // on, once, to where the velocity it has carries it on its spring (value + velocity / omega), gliding there with
-        // no bounce and swinging slightly past with some. It goes on the node's own spring with no delay, as Fling sets
-        // it, since a delayed spring is held still and would stop dead mid-throw, held by the change. Only once: sent
+        // no bounce and swinging slightly past with some. It goes on the node's spring for the change with no delay, as
+        // Fling sets it, since a delayed spring is held still and would stop dead mid-throw, held by the change. Only once: sent
         // on again every pass, it would be pushed as it slowed, which runs away on a bouncy spring. Place leaves it
         // there until it is shown again, when it turns back from where it is drawn. A position moving on no change only
         // because its away move was handed over outside a change (its Edge set there while it was partly shown) was
         // never flung, and heads home with the change as any other value of it does.
-        private static void Throw(NodeState state, LayoutTransition transition)
+        private static void Throw(NodeState state, MotionTransition transition)
         {
             var position = state.Position;
             if (state.Parent == null || !position.Moving || position.Transition != null || !state.Flung) return;
             state.Thrown = true;
-            Spring.Parameters(state.Node.Animation, out position.Omega, out position.Zeta);
+            Spring.Parameters(AnimationOf(state, transition), out position.Omega, out position.Zeta);
             position.Delay = 0f;
             position.Target = position.Value + position.Velocity / position.Omega;
             Hold(position, transition);
         }
 
-        private static void HoldIfMoving(Spring spring, LayoutTransition transition)
+        private static void HoldIfMoving(Spring spring, MotionTransition transition)
         {
             if (spring.Moving)
                 Hold(spring, transition);
@@ -1353,10 +1304,11 @@ namespace TimboJimbo.UI.Layout
         // which is what carries on from where it was drawn: its value by d x (1 - shown) and its velocity by d x the
         // shown value's, so neither where it is drawn nor how fast it moves there jumps, and the rest rides home on its
         // own position spring, the target (and so layout) untouched. A position at rest that this sets moving goes on
-        // the node's own spring with no delay (one only ever put where it goes has no spring, and stepping it on none
-        // would divide by nothing), held by `transition`, the pass's change; outside one, a node playing its way out
-        // has it held by the change it is leaving on, so that change still finishes only once the node has gone.
-        private static void UpdateAway(NodeState state, bool handOver, LayoutTransition transition)
+        // the node's spring for the change that holds it, with no delay (one only ever put where it goes has no spring,
+        // and stepping it on none would divide by nothing), held by `transition`, the pass's change; outside one, a node
+        // playing its way out has it held by the change it is leaving on, so that change still finishes only once the
+        // node has gone.
+        private static void UpdateAway(NodeState state, bool handOver, MotionTransition transition)
         {
             if (state.HoldShown) return;
             var away = AwayOf(state);
@@ -1372,9 +1324,10 @@ namespace TimboJimbo.UI.Layout
             var position = state.Position;
             if (!position.Moving)
             {
-                Spring.Parameters(state.Node.Animation, out position.Omega, out position.Zeta);
+                var holder = transition ?? (state.Leaving && !state.Riding ? state.Shown.Transition : null);
+                Spring.Parameters(AnimationOf(state, holder), out position.Omega, out position.Zeta);
                 position.Delay = 0f;
-                Hold(position, transition ?? (state.Leaving && !state.Riding ? state.Shown.Transition : null));
+                Hold(position, holder);
                 // Set off by this, not by a fling: hidden while it moves only from this, it is not thrown.
                 state.Flung = false;
             }
@@ -1543,11 +1496,11 @@ namespace TimboJimbo.UI.Layout
         // caught node dragged by its Offset follows the pointer exactly), while one already on its way heads there
         // instead, keeping its speed, its spring and the change it is moving for: a box changing under it because
         // something outside it is animating (a nested root's rect) does not cut its motion off. With a transition, it
-        // sets off from where it is at the velocity it has, on its node's spring after its delay, held by that
-        // transition until it comes to rest or is taken over in turn; a position bows out sideways by the animation's
-        // curvature. On an animation with no duration (None), it is put there at once, held by nothing, so it is drawn
+        // sets off from where it is at the velocity it has, on its node's spring for the change (its own animation, one
+        // it inherits, or the change's: AnimationOf) after its delay, held by that transition until it comes to rest or
+        // is taken over in turn; a position bows out sideways by the animation's curvature. On an animation with no duration (None), it is put there at once, held by nothing, so it is drawn
         // there in the frame of the change; with a delay as well, it waits that out and is put there then (Spring.Step).
-        private static void Retarget(NodeState state, Spring spring, Vector2 target, LayoutTransition transition)
+        private static void Retarget(NodeState state, Spring spring, Vector2 target, MotionTransition transition)
         {
             spring.Target = target;
             if (transition == null)
@@ -1563,7 +1516,7 @@ namespace TimboJimbo.UI.Layout
                 return;
             }
 
-            var animation = state.Node.Animation;
+            var animation = AnimationOf(state, transition);
             if (animation.AtOnce)
             {
                 Snap(spring, target, transition);
@@ -1598,94 +1551,11 @@ namespace TimboJimbo.UI.Layout
             return left * (sign * curvature * 0.68f * length * omega);
         }
 
-        // Sets a spring moving for `transition` (or for none), letting go of the one it was moving for, which it is
-        // taken over from on its way. One setting off from rest notes the frame, which does not step it.
-        private static void Hold(Spring spring, LayoutTransition transition)
-        {
-            if (spring.Transition != transition)
-            {
-                Release(spring);
-                spring.Transition = transition;
-                if (transition != null)
-                    transition.Moving++;
-            }
-            if (!spring.Moving)
-            {
-                spring.Moving = true;
-                spring.SetOff = Time.frameCount;
-            }
-        }
-
-        // Puts a spring where it is going, at rest, letting go of its transition, having `arrived` there or not (see
-        // Release).
-        private static void Stop(Spring spring, bool arrived = false)
-        {
-            spring.Value = spring.Target;
-            spring.Velocity = Vector2.zero;
-            spring.Delay = 0f;
-            spring.Moving = false;
-            Release(spring, arrived);
-        }
-
-        // Lets go of the transition a spring was moving for; one with nothing left moving finishes once the pass under
-        // way is over. Unless the spring `arrived` where it was going (stepped there, or skipped there), it was let go
-        // of on its way (taken over, caught, its node gone, a press taking hold of its scroll), and the transition does
-        // not complete.
-        private static void Release(Spring spring, bool arrived = false)
-        {
-            var transition = spring.Transition;
-            if (transition == null) return;
-            spring.Transition = null;
-            if (!arrived)
-                transition.Interrupted = true;
-            if (--transition.Moving <= 0)
-            {
-                transition.Moving = 0;
-                s_finishing.Add(transition);
-            }
-        }
-
-        // Finishes the transitions let go of, one at a time and each taken off the list first: a Finished handler may
-        // start another change, which may let go of more. Returns whether it finished any. Outside play mode there are
-        // none to finish: what leaving play mode let go of belongs to play mode, and its handlers never run.
-        private static bool Flush()
-        {
-            if (!Application.isPlaying)
-            {
-                s_finishing.Clear();
-                return false;
-            }
-            bool finished = false;
-            while (s_finishing.Count > 0)
-            {
-                var transition = s_finishing[0];
-                s_finishing.RemoveAt(0);
-                if (transition.Moving > 0) continue;
-                transition.Finish();
-                finished = true;
-            }
-            return finished;
-        }
-
+        // Finishes what a gesture or a scroll let go of, outside a pass or a change (which finish theirs once over).
         private static void FlushIfIdle()
         {
-            if (!s_passing && s_current == null)
+            if (!s_passing && Current == null)
                 Flush();
-        }
-
-        // Steps a moving spring once a frame in play mode, bar the frame it set off from rest in, and stops it where it
-        // is going once it is there. Outside play mode nothing animates: anything left moving is put where it was going.
-        private static void Advance(Spring spring, bool playing, bool step, float dt)
-        {
-            if (!spring.Moving) return;
-            if (!playing)
-            {
-                Stop(spring, arrived: true);
-                return;
-            }
-            if (!step || spring.SetOff == Time.frameCount) return;
-            if (spring.Step(dt))
-                Stop(spring, arrived: true);
         }
 
         // ── Drawing ──────────────────────────────────────────────────────────────
@@ -1861,7 +1731,7 @@ namespace TimboJimbo.UI.Layout
         // ScrollIntoView that finds its descendant in view sends it nowhere); and, at rest, it comes back into range if
         // its content shrank under it, on its spring for the change inside Animate and at once outside. Gliding or
         // springing, it is left to its motion, which settles in range.
-        private static void SettleScroll(NodeState state, LayoutTransition transition)
+        private static void SettleScroll(NodeState state, MotionTransition transition)
         {
             var scroll = state.Scroll;
             // Whether it is at its end on each axis, and its range, before this pass changes that range; and whether it
@@ -1919,7 +1789,7 @@ namespace TimboJimbo.UI.Layout
         // springing already, only where it springs to moves, so its motion carries on unbroken. Its other axis stays
         // where it is or goes where it was going. A range that shrank needs nothing: at rest it is brought back into
         // range anyway, and what it springs to is kept within range. Returns whether it moved it.
-        private static bool KeepAtEnd(NodeState state, bool x, bool y, Vector2 was, bool first, LayoutTransition transition)
+        private static bool KeepAtEnd(NodeState state, bool x, bool y, Vector2 was, bool first, MotionTransition transition)
         {
             var scroll = state.Scroll;
             var range = scroll.Range;
@@ -1949,7 +1819,7 @@ namespace TimboJimbo.UI.Layout
         // under a root of its own) is dropped, and a ScrollIntoView that finds it in view already moves nothing. Returns
         // whether it sent it somewhere: true for an offset or a ScrollTo even when that is where it is already, as either
         // asked for that place; false for one dropped, or a ScrollIntoView that moves nothing.
-        private static bool ResolveRequest(NodeState state, LayoutTransition transition)
+        private static bool ResolveRequest(NodeState state, MotionTransition transition)
         {
             var scroll = state.Scroll;
             var kind = scroll.Request;
@@ -2106,7 +1976,7 @@ namespace TimboJimbo.UI.Layout
             scroll.RequestOffset = offset;
             scroll.RequestTarget = descendant;
             scroll.RequestAnchor = anchor;
-            scroll.RequestTransition = s_current;
+            scroll.RequestTransition = Current;
         }
 
         private static void ClearRequest(ScrollState scroll)
@@ -2126,12 +1996,12 @@ namespace TimboJimbo.UI.Layout
         }
 
         // Scrolls a container to `offset`: at once without a transition, or on an animation with no duration and no delay;
-        // otherwise on the node's own spring (its Animation's duration, bounce and delay), from where it is drawn at the
-        // velocity it has, held by that change.
-        private static void MoveScroll(NodeState state, Vector2 offset, LayoutTransition transition)
+        // otherwise on the node's spring for the change (AnimationOf: its duration, bounce and delay), from where it is
+        // drawn at the velocity it has, held by that change.
+        private static void MoveScroll(NodeState state, Vector2 offset, MotionTransition transition)
         {
             var scroll = state.Scroll;
-            var animation = state.Node.Animation;
+            var animation = AnimationOf(state, transition);
             if (transition == null || animation.AtOnce)
             {
                 StopScrollAt(scroll, offset);
@@ -2144,7 +2014,7 @@ namespace TimboJimbo.UI.Layout
         // Sets a scroll springing to `target` on the spring given, from where it is drawn at the velocity it has, held
         // by `transition` (or by none, letting go of any it was held by), and letting go of any press, glide or wheel.
         // At rest there already, there is nothing to move.
-        private static void SpringScroll(ScrollState scroll, Vector2 target, float omega, float zeta, float delay, LayoutTransition transition)
+        private static void SpringScroll(ScrollState scroll, Vector2 target, float omega, float zeta, float delay, MotionTransition transition)
         {
             var offset = scroll.Offset;
             scroll.Press = null;
