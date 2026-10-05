@@ -1,5 +1,7 @@
 # UI Layout
 
+> **Moved.** UI Layout is now part of [Timbo Jimbo - UI](https://github.com/Timbo-Jimbo/UI) (`com.timbojimbo.ui` 0.3.0 and later), under the `TimboJimbo.UI.Layout` namespace. This repository is archived at UI Layout 0.5.0, the version the UI package took it from.
+
 Layout and motion for UGUI in one system, modelled on [Clay](https://github.com/nicbarker/clay) and moved like SwiftUI. A layout pass says where every node goes; nodes get there on springs, from where they are drawn and at the velocity they have. On top of that: wrapping and grids, the safe area, show and hide effects, matched names that fly between places, and scrolling with nested drags, paging and indicators.
 
 Requires Unity 6000.0 or later, `com.unity.ugui` 2.0.0 and `com.timbojimbo.core`.
