@@ -1,7 +1,7 @@
 {
 	"name": "com.timbojimbo.ui.layout",
 	"displayName": "UI Layout",
-	"version": "0.4.0",
+	"version": "0.5.0",
 	"unity": "6000.0",
 	"unityRelease": "0f1",
 	"description": "Layout and motion for UGUI in one system, modelled on Clay: a layout pass that says where every node goes, and nodes that get there with velocity, on springs. Wrapping and grids, the safe area, show and hide effects, matched names that fly between places, and scrolling with nested drags, paging and indicators.",
